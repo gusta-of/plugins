@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { LogView } from './logView';
 import * as vscode from 'vscode';
 import * as M from './modules';
 import { Operations, BuildOptions, Paths } from './operations';
@@ -26,9 +27,9 @@ function readSettings(): Settings {
 const prefix: Record<LogKind, string> = { info: '', ok: '✔ ', err: '✘ ', sys: '', warn: '⚠ ' };
 
 export function activate(context: vscode.ExtensionContext): void {
-  const tasksOut = vscode.window.createOutputChannel('PEM WL — Tarefas');
-  const wlOut = vscode.window.createOutputChannel('PEM WL — WebLogic');
-  const logTo = (ch: vscode.OutputChannel) => (text: string, kind: LogKind = 'info') => ch.appendLine(prefix[kind] + text);
+  const tasksOut = new LogView('PEM WL — Tarefas');
+  const wlOut = new LogView('PEM WL — WebLogic');
+  const logTo = (ch: LogView) => (text: string, kind: LogKind = 'info') => ch.appendLine(prefix[kind] + text);
 
   const runner = new TaskRunner(logTo(tasksOut));
   const wlRunner = new TaskRunner(logTo(wlOut));
@@ -90,7 +91,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /** Regista um comando de tarefa: abre o canal certo, trava o botão e destrava quando acabar. */
-  const task = (name: string, r: TaskRunner, out: vscode.OutputChannel, keys: Set<string>, fn: () => Thenable<unknown> | Promise<unknown> | undefined) =>
+  const task = (name: string, r: TaskRunner, out: LogView, keys: Set<string>, fn: () => Thenable<unknown> | Promise<unknown> | undefined) =>
     context.subscriptions.push(vscode.commands.registerCommand(`pemWlTools.${name}`, async () => {
       const before = r.busy;
       const p = fn();

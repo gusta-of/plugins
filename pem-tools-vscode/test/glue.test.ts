@@ -17,10 +17,25 @@ let msgHandler: ((m: any) => unknown) | undefined;
 const fake = {
   StatusBarAlignment: { Left: 1 },
   ConfigurationTarget: { Global: 1 },
+  EventEmitter: class { private ls: ((e: any) => void)[] = []; event = (f: (e: any) => void) => { this.ls.push(f); return { dispose() {} }; }; fire(e: any) { this.ls.forEach((f) => f(e)); } dispose() {} },
+  ViewColumn: { Active: -1, Beside: -2 },
+  ThemeIcon: class { constructor(public id: string) {} },
   ThemeColor: class { constructor(public id: string) {} },
   Uri: { file: (p: string) => ({ fsPath: p }), joinPath: (b: any, ...p: string[]) => ({ fsPath: path.join(b.fsPath, ...p), toString: () => path.join(b.fsPath, ...p) }) },
   window: {
-    createOutputChannel: (n: string) => { const l: string[] = []; outputs.set(n, l); return { appendLine: (s: string) => l.push(s), show() {}, dispose() {} }; },
+    createWebviewPanel: (_t: string, title: string) => {
+      const l: string[] = [];
+      outputs.set(title, l);
+      let handler: ((m: any) => void) | undefined;
+      return {
+        reveal() {}, dispose() {}, onDidDispose: () => ({ dispose() {} }),
+        webview: {
+          set html(_v: string) { setTimeout(() => handler?.({ type: 'ready' }), 0); },
+          onDidReceiveMessage: (h: (m: any) => void) => { handler = h; return { dispose() {} }; },
+          postMessage: async (m: any) => { if (m.type === 'init') { l.length = 0; l.push(...m.lines); } else if (m.type === 'append') l.push(...m.lines); return true; },
+        },
+      };
+    },
     createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {} }),
     showErrorMessage: async (m: string) => { dialogs.error.push(m); },
     showWarningMessage: async () => dialogs.warning,
@@ -103,6 +118,7 @@ test('extensão: ativa, regista comandos/painel e o fluxo de deploy com botão t
   const states = posted.filter((m) => m.type === 'state');
   assert.ok(states.some((s) => s.locked.includes('deployBackend')), 'o botão ficou travado durante a tarefa');
   assert.deepEqual(states.at(-1).locked, [], 'e destravou no fim');
+  await new Promise((r) => setTimeout(r, 200)); // o registo é enviado em lotes
   assert.ok(outputs.get('PEM WL — Tarefas')!.some((l) => l.includes('Deploy Backend: concluído com sucesso')));
 
   // limpeza com confirmação recusada não apaga nada

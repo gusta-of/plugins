@@ -114,7 +114,7 @@ export class PanelProvider implements vscode.WebviewViewProvider {
   ${group('Tarefa', btn('cancel', 'stop-circle', 'Cancelar a tarefa em curso'))}
   <div id="barBox"><div id="bar"></div></div>
   <div id="ptxt"></div>
-  <div class="hint">Os logs estão em <b>Saída</b> (Output): «PEM WL — Tarefas» e «PEM WL — WebLogic». Também há comandos na paleta (<code>PEM WL:</code>).</div>
+  <div class="hint">Os logs abrem em painéis do editor: «PEM WL — Tarefas» e «PEM WL — WebLogic» (com pesquisa; arraste o separador para uma janela nova — seguem sempre o fim). Também há comandos na paleta (<code>PEM WL:</code>).</div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
