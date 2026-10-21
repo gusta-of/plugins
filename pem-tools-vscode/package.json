@@ -1,0 +1,158 @@
+{
+  "name": "pem-wl-tools",
+  "displayName": "PEM WL Tools",
+  "description": "Painel para limpar caches, compilar (Maven), fazer deploy e arrancar/parar o WebLogic do PEM.",
+  "version": "1.0.0",
+  "publisher": "gustavo",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "pemWlTools",
+          "title": "PEM WL Tools",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "pemWlTools": [
+        {
+          "type": "webview",
+          "id": "pemWlTools.panel",
+          "name": "Painel"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "pemWlTools.startWebLogic",
+        "title": "PEM WL: Start WebLogic"
+      },
+      {
+        "command": "pemWlTools.stopWebLogic",
+        "title": "PEM WL: Stop WebLogic (gracioso e depois forçar)"
+      },
+      {
+        "command": "pemWlTools.killWebLogic",
+        "title": "PEM WL: Kill WebLogic (forçar já)"
+      },
+      {
+        "command": "pemWlTools.clearClasspath",
+        "title": "PEM WL: Limpar cache/classpath"
+      },
+      {
+        "command": "pemWlTools.cleanTargets",
+        "title": "PEM WL: Limpar pastas target/"
+      },
+      {
+        "command": "pemWlTools.killJars",
+        "title": "PEM WL: Matar processos java dos módulos"
+      },
+      {
+        "command": "pemWlTools.buildBackend",
+        "title": "PEM WL: Build Backend"
+      },
+      {
+        "command": "pemWlTools.buildFrontend",
+        "title": "PEM WL: Build Frontend"
+      },
+      {
+        "command": "pemWlTools.buildFrontendFast",
+        "title": "PEM WL: Build Frontend rápido (-T)"
+      },
+      {
+        "command": "pemWlTools.buildModules",
+        "title": "PEM WL: Build de módulos isolados…"
+      },
+      {
+        "command": "pemWlTools.deployBackend",
+        "title": "PEM WL: Deploy Backend…"
+      },
+      {
+        "command": "pemWlTools.deployFrontend",
+        "title": "PEM WL: Deploy Frontend…"
+      },
+      {
+        "command": "pemWlTools.deployModules",
+        "title": "PEM WL: Deploy de módulos isolados…"
+      },
+      {
+        "command": "pemWlTools.cancel",
+        "title": "PEM WL: Cancelar a tarefa em curso"
+      }
+    ],
+    "configuration": {
+      "title": "PEM WL Tools",
+      "properties": {
+        "pemWlTools.workspacePath": {
+          "type": "string",
+          "default": "",
+          "description": "Pasta do workspace do PEM (PEM_Aplicacao)."
+        },
+        "pemWlTools.domainPath": {
+          "type": "string",
+          "default": "",
+          "description": "Pasta do domínio WebLogic / AdminServer (ex.: /opt/oracle/middleware/user_projects/domains/PEM)."
+        },
+        "pemWlTools.mavenProfile": {
+          "type": "string",
+          "default": "",
+          "description": "Perfil(is) Maven opcional(is), ex.: dev ou dev,qua."
+        },
+        "pemWlTools.skipTests": {
+          "type": "boolean",
+          "default": false,
+          "description": "Acrescenta -Dmaven.test.skip=true aos builds."
+        },
+        "pemWlTools.localMock": {
+          "type": "boolean",
+          "default": false,
+          "description": "Acrescenta -PlocalMock ao build do módulo pem-common-domain (e só a ele)."
+        },
+        "pemWlTools.threads": {
+          "type": "string",
+          "default": "1C",
+          "enum": [
+            "1C",
+            "0.5C",
+            "2C",
+            "1",
+            "2",
+            "4",
+            "6",
+            "8",
+            "12",
+            "16"
+          ],
+          "description": "Threads do Build Frontend rápido (mvn -T)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p . --noEmit",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/extension.js --sourcemap",
+    "build": "npm run assets && npm run compile && npm run bundle",
+    "test": "node --import tsx --test test/*.test.ts",
+    "package": "npm run build && vsce package --no-dependencies",
+    "assets": "node scripts/copy-codicons.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/codicons": "^0.0.36",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

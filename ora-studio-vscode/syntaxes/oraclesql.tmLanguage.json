@@ -1,0 +1,16 @@
+{
+  "name": "Oracle SQL / PL/SQL",
+  "scopeName": "source.oraclesql",
+  "patterns": [
+    { "name": "comment.line.double-dash.oraclesql", "match": "--.*$" },
+    { "name": "comment.block.oraclesql", "begin": "/\\*", "end": "\\*/" },
+    { "name": "string.quoted.other.oraclesql", "begin": "[qQ]'([\\[{(<!])", "end": "[\\]})>!]'" },
+    { "name": "string.quoted.single.oraclesql", "begin": "'", "end": "'", "patterns": [{ "match": "''" }] },
+    { "name": "string.quoted.double.oraclesql", "begin": "\"", "end": "\"" },
+    { "name": "constant.numeric.oraclesql", "match": "\\b\\d+(\\.\\d+)?\\b" },
+    { "name": "variable.other.bind.oraclesql", "match": ":[A-Za-z_][A-Za-z0-9_]*" },
+    { "name": "keyword.control.oraclesql", "match": "(?i)\\b(select|from|where|and|or|not|in|is|null|exists|between|like|as|distinct|union|all|minus|intersect|group|by|order|having|join|inner|left|right|full|outer|cross|on|using|case|when|then|else|end|insert|into|values|update|set|delete|merge|create|alter|drop|truncate|table|view|materialized|index|sequence|trigger|procedure|function|package|body|type|replace|synonym|begin|declare|exception|loop|while|for|if|elsif|return|returns|cursor|open|close|fetch|commit|rollback|savepoint|grant|revoke|with|connect|start|prior|level|rownum|rowid|sysdate|systimestamp|dual|asc|desc|over|partition|default|constraint|primary|key|foreign|references|unique|check|refresh|complete|demand|immediate|execute|pragma|before|after|each|row|for|out|nocopy|bulk|collect|forall|limit)\\b" },
+    { "name": "storage.type.oraclesql", "match": "(?i)\\b(number|varchar2|nvarchar2|char|nchar|date|timestamp|clob|nclob|blob|raw|integer|int|float|binary_integer|pls_integer|boolean|rowtype|long)\\b" },
+    { "name": "support.function.oraclesql", "match": "(?i)\\b(nvl2?|coalesce|decode|to_char|to_date|to_number|to_timestamp|trunc|round|substr|instr|length|upper|lower|trim|ltrim|rtrim|replace|count|sum|avg|min|max|listagg|row_number|rank|dense_rank|lag|lead|add_months|months_between|last_day|cast|regexp_like|regexp_substr|regexp_replace|dbms_output|put_line)\\b(?=\\s*\\(|\\.)" }
+  ]
+}

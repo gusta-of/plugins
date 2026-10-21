@@ -1,0 +1,17 @@
+<idea-plugin>
+    <id>pt.pem.tools</id>
+    <name>PEM WL Tools</name>
+    <vendor>gustavo</vendor>
+    <description>Painel com botoes para limpar caches, compilar, fazer deploy e arrancar/parar o WebLogic do PEM.</description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="PEM WL Tools"
+                    anchor="right"
+                    secondary="false"
+                    icon="AllIcons.Nodes.Plugin"
+                    factoryClass="pt.pem.tools.PemToolWindowFactory"/>
+        <notificationGroup id="PEM WL Tools" displayType="BALLOON"/>
+    </extensions>
+</idea-plugin>

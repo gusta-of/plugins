@@ -1,0 +1,121 @@
+{
+  "name": "ora-studio",
+  "displayName": "Ora Studio",
+  "description": "Cliente Oracle: ligações, navegação por schemas/objetos, consola SQL, autocompletar e Ctrl+clique para ir para a definição (DDL de tabelas, views, MVs, triggers, procedures, packages).",
+  "version": "1.0.0",
+  "publisher": "gustavo",
+  "license": "UNLICENSED",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Programming Languages", "Other"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "oraclesql",
+        "aliases": ["Oracle SQL", "oraclesql"],
+        "extensions": [".orasql", ".pls", ".plsql", ".pkb", ".pks", ".fnc", ".prc", ".trg"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      { "language": "oraclesql", "scopeName": "source.oraclesql", "path": "./syntaxes/oraclesql.tmLanguage.json" }
+    ],
+    "viewsContainers": {
+      "activitybar": [{ "id": "oraStudio", "title": "Ora Studio", "icon": "media/activity.svg" }],
+      "panel": [{ "id": "oraStudioPanel", "title": "Ora Studio", "icon": "media/activity.svg" }]
+    },
+    "views": {
+      "oraStudio": [{ "id": "oraStudio.connections", "name": "Ligações" }],
+      "oraStudioPanel": [{ "type": "webview", "id": "oraStudio.results", "name": "Resultados" }]
+    },
+    "commands": [
+      { "command": "oraStudio.newConnection", "title": "Ora Studio: Nova ligação…", "icon": "$(add)" },
+      { "command": "oraStudio.editConnection", "title": "Editar ligação…" },
+      { "command": "oraStudio.duplicateConnection", "title": "Duplicar ligação" },
+      { "command": "oraStudio.deleteConnection", "title": "Remover ligação" },
+      { "command": "oraStudio.connect", "title": "Ligar" },
+      { "command": "oraStudio.disconnect", "title": "Desligar" },
+      { "command": "oraStudio.refresh", "title": "Ora Studio: Atualizar", "icon": "$(refresh)" },
+      { "command": "oraStudio.newConsole", "title": "Ora Studio: Nova consola SQL", "icon": "$(terminal)" },
+      { "command": "oraStudio.runStatement", "title": "Ora Studio: Executar instrução (ou seleção)", "icon": "$(play)" },
+      { "command": "oraStudio.runScript", "title": "Ora Studio: Executar script (ou seleção)", "icon": "$(run-all)" },
+      { "command": "oraStudio.cancel", "title": "Ora Studio: Cancelar execução", "icon": "$(debug-stop)" },
+      { "command": "oraStudio.commit", "title": "Ora Studio: Commit" },
+      { "command": "oraStudio.rollback", "title": "Ora Studio: Rollback" },
+      { "command": "oraStudio.toggleAutoCommit", "title": "Ora Studio: Alternar auto-commit" },
+      { "command": "oraStudio.selectConnection", "title": "Ora Studio: Associar este ficheiro a uma ligação…" },
+      { "command": "oraStudio.selectSchema", "title": "Ora Studio: Escolher o schema desta consola…", "icon": "$(symbol-namespace)" },
+      { "command": "oraStudio.goToObject", "title": "Ora Studio: Ir para objeto…", "icon": "$(search)" },
+      { "command": "oraStudio.openObject", "title": "Abrir" },
+      { "command": "oraStudio.openDdl", "title": "Abrir DDL / código" },
+      { "command": "oraStudio.openStructure", "title": "Ver estrutura" },
+      { "command": "oraStudio.selectFrom", "title": "SELECT * numa consola" },
+      { "command": "oraStudio.copyName", "title": "Copiar nome" },
+      { "command": "oraStudio.configureDrivers", "title": "Ora Studio: Drivers JDBC…" },
+      { "command": "oraStudio.showLog", "title": "Ora Studio: Mostrar registo" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "oraStudio.newConnection", "when": "view == oraStudio.connections", "group": "navigation@1" },
+        { "command": "oraStudio.newConsole", "when": "view == oraStudio.connections", "group": "navigation@2" },
+        { "command": "oraStudio.goToObject", "when": "view == oraStudio.connections", "group": "navigation@3" },
+        { "command": "oraStudio.refresh", "when": "view == oraStudio.connections", "group": "navigation@4" }
+      ],
+      "view/item/context": [
+        { "command": "oraStudio.connect", "when": "view == oraStudio.connections && viewItem == connection", "group": "1_conn@1" },
+        { "command": "oraStudio.disconnect", "when": "view == oraStudio.connections && viewItem == connectionOn", "group": "1_conn@1" },
+        { "command": "oraStudio.newConsole", "when": "view == oraStudio.connections && viewItem =~ /^connection/", "group": "1_conn@2" },
+        { "command": "oraStudio.editConnection", "when": "view == oraStudio.connections && viewItem =~ /^connection/", "group": "2_edit@1" },
+        { "command": "oraStudio.duplicateConnection", "when": "view == oraStudio.connections && viewItem =~ /^connection/", "group": "2_edit@2" },
+        { "command": "oraStudio.deleteConnection", "when": "view == oraStudio.connections && viewItem =~ /^connection/", "group": "2_edit@3" },
+        { "command": "oraStudio.openDdl", "when": "view == oraStudio.connections && viewItem =~ /^object/", "group": "1_obj@1" },
+        { "command": "oraStudio.openStructure", "when": "view == oraStudio.connections && viewItem =~ /^object/", "group": "1_obj@2" },
+        { "command": "oraStudio.selectFrom", "when": "view == oraStudio.connections && viewItem == objectRelation", "group": "1_obj@3" },
+        { "command": "oraStudio.copyName", "when": "view == oraStudio.connections && viewItem =~ /^object/", "group": "2_obj@1" }
+      ],
+      "editor/title": [
+        { "command": "oraStudio.runStatement", "when": "oraStudio.bound", "group": "navigation@1" },
+        { "command": "oraStudio.runScript", "when": "oraStudio.bound", "group": "navigation@2" },
+        { "command": "oraStudio.selectSchema", "when": "oraStudio.bound", "group": "navigation@0" },
+        { "command": "oraStudio.cancel", "when": "oraStudio.bound", "group": "navigation@3" }
+      ],
+      "editor/context": [
+        { "command": "oraStudio.runStatement", "when": "oraStudio.bound && editorTextFocus", "group": "oraStudio@1" },
+        { "command": "oraStudio.runScript", "when": "oraStudio.bound && editorTextFocus", "group": "oraStudio@2" },
+        { "command": "oraStudio.selectConnection", "when": "editorLangId == oraclesql || editorLangId == sql", "group": "oraStudio@3" },
+        { "command": "oraStudio.selectSchema", "when": "oraStudio.bound", "group": "oraStudio@4" }
+      ]
+    },
+    "keybindings": [
+      { "command": "oraStudio.runStatement", "key": "ctrl+enter", "mac": "cmd+enter", "when": "editorTextFocus && oraStudio.bound" },
+      { "command": "oraStudio.runScript", "key": "ctrl+shift+enter", "mac": "cmd+shift+enter", "when": "editorTextFocus && oraStudio.bound" },
+      { "command": "oraStudio.runScript", "key": "f5", "when": "editorTextFocus && oraStudio.bound" },
+      { "command": "oraStudio.goToObject", "key": "ctrl+alt+n", "mac": "cmd+alt+n" }
+    ],
+    "configuration": {
+      "title": "Ora Studio",
+      "properties": {
+        "oraStudio.javaPath": { "type": "string", "default": "", "description": "Caminho do java (17 ou superior). Vazio = procura automaticamente (JAVA_HOME, /usr/lib/jvm, PATH…)." },
+        "oraStudio.rowLimit": { "type": "number", "default": 500, "description": "Linhas carregadas por consulta (depois 'Carregar mais')." },
+        "oraStudio.stopOnError": { "type": "boolean", "default": true, "description": "Parar um script no primeiro erro." }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p . --noEmit",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/extension.js --sourcemap",
+    "server": "cd ../ora-studio-server && ./gradlew serverJar && cp build/libs/orastudio-server.jar ../ora-studio-vscode/server/",
+    "build": "npm run compile && npm run bundle",
+    "test": "node --import tsx --test test/*.test.ts",
+    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository --skip-license"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

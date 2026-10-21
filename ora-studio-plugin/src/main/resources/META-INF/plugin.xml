@@ -1,0 +1,20 @@
+<idea-plugin>
+    <id>orastudio.plugin</id>
+    <name>Ora Studio</name>
+    <vendor>gustavo</vendor>
+    <description><![CDATA[
+        Cliente Oracle dentro do IntelliJ: ligações (SID / Service name / URL) com qualquer driver ojdbc6+,
+        navegação por schemas, tabelas, views, materialized views, triggers, procedures e packages,
+        consola SQL com execução de scripts e <b>Ctrl+clique para navegar</b> entre objetos.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Ora Studio"
+                    anchor="bottom"
+                    secondary="false"
+                    icon="AllIcons.Nodes.DataTables"
+                    factoryClass="orastudio.plugin.OraStudioToolWindowFactory"/>
+    </extensions>
+</idea-plugin>
