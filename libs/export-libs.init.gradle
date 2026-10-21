@@ -1,0 +1,20 @@
+// Init script: regista a tarefa exportLibs em cada projeto (copia as dependências resolvidas para -PlibsOut=<pasta>).
+allprojects {
+    afterEvaluate { p ->
+        p.tasks.register("exportLibs") {
+            doLast {
+                def out = new File(p.findProperty("libsOut") as String, p.name)
+                out.mkdirs()
+                ["runtimeClasspath", "testRuntimeClasspath"].each { cfgName ->
+                    def cfg = p.configurations.findByName(cfgName)
+                    if (cfg == null || !cfg.canBeResolved) return
+                    def sub = new File(out, cfgName == "runtimeClasspath" ? "runtime" : "test")
+                    sub.mkdirs()
+                    cfg.resolvedConfiguration.lenientConfiguration.artifacts.each { a ->
+                        if (a.file.name.endsWith(".jar")) p.copy { from a.file; into sub }
+                    }
+                }
+            }
+        }
+    }
+}
