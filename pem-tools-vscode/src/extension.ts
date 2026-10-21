@@ -1,5 +1,5 @@
 import * as fs from 'node:fs';
-import { LogView } from './logView';
+import { LogChannel, LogHub } from './logHub';
 import * as vscode from 'vscode';
 import * as M from './modules';
 import { Operations, BuildOptions, Paths } from './operations';
@@ -27,9 +27,10 @@ function readSettings(): Settings {
 const prefix: Record<LogKind, string> = { info: '', ok: '✔ ', err: '✘ ', sys: '', warn: '⚠ ' };
 
 export function activate(context: vscode.ExtensionContext): void {
-  const tasksOut = new LogView('PEM WL — Tarefas');
-  const wlOut = new LogView('PEM WL — WebLogic');
-  const logTo = (ch: LogView) => (text: string, kind: LogKind = 'info') => ch.appendLine(prefix[kind] + text);
+  const hub = new LogHub([{ id: 'tasks', label: 'Tarefas' }, { id: 'wl', label: 'WebLogic' }]);
+  const tasksOut = hub.channel('tasks');
+  const wlOut = hub.channel('wl');
+  const logTo = (ch: LogChannel) => (text: string, kind: LogKind = 'info') => ch.appendLine(prefix[kind] + text);
 
   const runner = new TaskRunner(logTo(tasksOut));
   const wlRunner = new TaskRunner(logTo(wlOut));
@@ -91,7 +92,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /** Regista um comando de tarefa: abre o canal certo, trava o botão e destrava quando acabar. */
-  const task = (name: string, r: TaskRunner, out: LogView, keys: Set<string>, fn: () => Thenable<unknown> | Promise<unknown> | undefined) =>
+  const task = (name: string, r: TaskRunner, out: LogChannel, keys: Set<string>, fn: () => Thenable<unknown> | Promise<unknown> | undefined) =>
     context.subscriptions.push(vscode.commands.registerCommand(`pemWlTools.${name}`, async () => {
       const before = r.busy;
       const p = fn();
@@ -173,8 +174,10 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('pemWlTools.cancel', () => { runner.cancel(); wlRunner.cancel(); }),
     vscode.window.registerWebviewViewProvider(PanelProvider.viewType, panel),
+    vscode.window.registerWebviewViewProvider(LogHub.viewType, hub, { webviewOptions: { retainContextWhenHidden: true } }),
+    hub,
     vscode.workspace.onDidChangeConfiguration((e) => { if (e.affectsConfiguration(SECTION)) panel.pushState(); }),
-    tasksOut, wlOut, statusItem,
+    statusItem,
   );
 }
 

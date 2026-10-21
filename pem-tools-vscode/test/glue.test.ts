@@ -12,6 +12,7 @@ const settings = new Map<string, unknown>();
 const posted: any[] = [];
 const dialogs: { quickPick?: (items: any[]) => any; warning?: string; error: string[]; open?: string } = { error: [] };
 let viewProvider: any;
+let logProvider: any;
 let msgHandler: ((m: any) => unknown) | undefined;
 
 const fake = {
@@ -23,25 +24,12 @@ const fake = {
   ThemeColor: class { constructor(public id: string) {} },
   Uri: { file: (p: string) => ({ fsPath: p }), joinPath: (b: any, ...p: string[]) => ({ fsPath: path.join(b.fsPath, ...p), toString: () => path.join(b.fsPath, ...p) }) },
   window: {
-    createWebviewPanel: (_t: string, title: string) => {
-      const l: string[] = [];
-      outputs.set(title, l);
-      let handler: ((m: any) => void) | undefined;
-      return {
-        reveal() {}, dispose() {}, onDidDispose: () => ({ dispose() {} }),
-        webview: {
-          set html(_v: string) { setTimeout(() => handler?.({ type: 'ready' }), 0); },
-          onDidReceiveMessage: (h: (m: any) => void) => { handler = h; return { dispose() {} }; },
-          postMessage: async (m: any) => { if (m.type === 'init') { l.length = 0; l.push(...m.lines); } else if (m.type === 'append') l.push(...m.lines); return true; },
-        },
-      };
-    },
     createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {} }),
     showErrorMessage: async (m: string) => { dialogs.error.push(m); },
     showWarningMessage: async () => dialogs.warning,
     showQuickPick: async (items: any[]) => dialogs.quickPick?.(items),
     showOpenDialog: async () => (dialogs.open ? [{ fsPath: dialogs.open }] : undefined),
-    registerWebviewViewProvider: (_t: string, p: unknown) => { viewProvider = p; return { dispose() {} }; },
+    registerWebviewViewProvider: (t: string, p: unknown) => { if (t === 'pemWlTools.logs') logProvider = p; else viewProvider = p; return { dispose() {} }; },
   },
   commands: {
     registerCommand: (id: string, fn: (...a: unknown[]) => unknown) => { commands.set(id, fn); return { dispose() {} }; },
@@ -85,6 +73,25 @@ test('extensão: ativa, regista comandos/painel e o fluxo de deploy com botão t
     visible: true, onDidChangeVisibility: () => ({ dispose() {} }),
   };
   viewProvider.resolveWebviewView(view);
+  // vista «Logs»: recolhe o que a extensão envia por canal
+  assert.ok(logProvider, 'vista de logs registada');
+  let logHandler: ((m: any) => void) | undefined;
+  const logView: any = {
+    show() {}, onDidDispose: () => ({ dispose() {} }),
+    webview: {
+      options: undefined, html: '',
+      onDidReceiveMessage: (cb: any) => { logHandler = cb; return { dispose() {} }; },
+      postMessage: async (m: any) => {
+        if (m.type === 'init') for (const [k, v] of Object.entries(m.data)) outputs.set(k, [...(v as string[])]);
+        else if (m.type === 'append') outputs.get(m.channel)!.push(...m.lines);
+        return true;
+      },
+    },
+  };
+  logProvider.resolveWebviewView(logView);
+  assert.match(logView.webview.html, /Content-Security-Policy/);
+  assert.ok(logView.webview.html.includes('data-id="tasks"') && logView.webview.html.includes('data-id="wl"'), 'abas Tarefas e WebLogic');
+  logHandler!({ type: 'ready' });
   assert.match(view.webview.html, /Content-Security-Policy/);
   for (const cmd of ['startWebLogic', 'stopWebLogic', 'killWebLogic', 'clearClasspath', 'cleanTargets', 'killJars', 'buildBackend', 'buildFrontend', 'buildFrontendFast', 'buildModules', 'deployBackend', 'deployFrontend', 'deployModules', 'cancel'])
     assert.ok(view.webview.html.includes(`data-cmd="${cmd}"`), `botão ${cmd}`);
@@ -119,7 +126,7 @@ test('extensão: ativa, regista comandos/painel e o fluxo de deploy com botão t
   assert.ok(states.some((s) => s.locked.includes('deployBackend')), 'o botão ficou travado durante a tarefa');
   assert.deepEqual(states.at(-1).locked, [], 'e destravou no fim');
   await new Promise((r) => setTimeout(r, 200)); // o registo é enviado em lotes
-  assert.ok(outputs.get('PEM WL — Tarefas')!.some((l) => l.includes('Deploy Backend: concluído com sucesso')));
+  assert.ok(outputs.get('tasks')!.some((l) => l.includes('Deploy Backend: concluído com sucesso')));
 
   // limpeza com confirmação recusada não apaga nada
   touch(path.join(ws, 'x/target/a.class'));

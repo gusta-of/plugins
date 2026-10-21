@@ -29,6 +29,11 @@
           "type": "webview",
           "id": "pemWlTools.panel",
           "name": "Painel"
+        },
+        {
+          "type": "webview",
+          "id": "pemWlTools.logs",
+          "name": "Logs"
         }
       ]
     },
