@@ -51,6 +51,16 @@ export interface ProgressEvent {
   finished: boolean;
 }
 
+export interface StepResult {
+  id: number;
+  label: string;
+  status: 'running' | 'ok' | 'fail' | 'warn';
+  /** saída do passo (as últimas linhas), mostrada em «Ver erro» */
+  output: string;
+}
+
+const MAX_CAPTURE = 3000;
+
 /** Executa sequências de passos; nunca para à primeira falha (como o build-backend.sh) e imprime o resumo. */
 export class TaskRunner {
   busy = false;
@@ -58,6 +68,12 @@ export class TaskRunner {
   private current?: ChildProcess;
   onProgress: (e: ProgressEvent) => void = () => {};
   onFinished: () => void = () => {};
+  /** resultados por passo (para a vista «Artefactos») */
+  results: StepResult[] = [];
+  resultsTitle = '';
+  onResults: () => void = () => {};
+  /** linhas do comando em curso (para o «Ver erro» do passo) */
+  capture?: string[];
 
   constructor(readonly log: Log) {}
 
@@ -78,6 +94,9 @@ export class TaskRunner {
     }
     this.busy = true;
     this.cancelled = false;
+    this.results = [];
+    this.resultsTitle = title;
+    this.onResults();
     const steps = new Steps(this, total);
     this.log(`=== ${title} ===`, 'sys');
     this.onProgress({ done: 0, total, label: title, finished: false });
@@ -98,6 +117,7 @@ export class TaskRunner {
       steps.failed.forEach((f) => this.log(` - ${f}`, 'err'));
     }
     this.onProgress({ done: this.cancelled || steps.failed.length ? steps.done : total, total, label: '', finished: true });
+    this.onResults();
     this.onFinished();
     return true;
   }
@@ -113,9 +133,10 @@ export class TaskRunner {
         this.log(`Timeout de ${timeoutSec}s: a terminar o comando.`, 'err');
         killTree(child);
       }, timeoutSec * 1000) : undefined;
-      const out = (chunk: Buffer) => this.log(stripAnsi(chunk.toString('utf8')).replace(/\r?\n$/, ''));
+      const keep = (t: string) => { const c = this.capture; if (c) { c.push(t); if (c.length > MAX_CAPTURE) c.splice(0, c.length - MAX_CAPTURE); } };
+      const out = (chunk: Buffer) => { const t = stripAnsi(chunk.toString('utf8')).replace(/\r?\n$/, ''); keep(t); this.log(t); };
       child.stdout?.on('data', out);
-      child.stderr?.on('data', (c: Buffer) => this.log(stripAnsi(c.toString('utf8')).replace(/\r?\n$/, ''), 'err'));
+      child.stderr?.on('data', (c: Buffer) => { const t = stripAnsi(c.toString('utf8')).replace(/\r?\n$/, ''); keep(t); this.log(t, 'err'); });
       child.on('error', (e) => { this.log(`Falha a iniciar: ${e.message}`, 'err'); if (timer) clearTimeout(timer); resolve(-2); });
       child.on('close', (code) => { if (timer) clearTimeout(timer); resolve(timedOut ? -1 : (code ?? -1)); });
     });
@@ -133,16 +154,33 @@ export class Steps {
     this.runner.onProgress({ done: this.done, total: this.total, label, finished: false });
   }
 
+  private begin(label: string): StepResult {
+    const r: StepResult = { id: this.runner.results.length + 1, label, status: 'running', output: '' };
+    this.runner.results.push(r);
+    this.runner.onResults();
+    return r;
+  }
+
+  private end(r: StepResult, status: StepResult['status'], output: string): void {
+    r.status = status;
+    r.output = output;
+    this.runner.onResults();
+  }
+
   /** Passo em TypeScript (cópias, apagar pastas, ...). */
   async step(label: string, action: () => Promise<void> | void): Promise<void> {
     if (this.runner.isCancelled) return;
     this.runner.log(`==> ${label}`);
+    const res = this.begin(label);
     try {
       await action();
       this.runner.log(`OK: ${label}`, 'ok');
+      this.end(res, 'ok', '');
     } catch (e) {
+      const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
       this.runner.log(`FAILED: ${label} (${e instanceof Error ? e.message : e})`, 'err');
       this.failed.push(label);
+      this.end(res, 'fail', msg);
     }
     this.finished(label);
   }
@@ -151,18 +189,24 @@ export class Steps {
   async shell(label: string, cwd: string, command: string, opts: { timeoutSec?: number; allowFail?: boolean } = {}): Promise<void> {
     if (this.runner.isCancelled) return;
     this.runner.log(`==> ${label}`);
+    const res = this.begin(label);
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
       this.runner.log(`FAILED: ${label} (pasta inexistente: ${cwd})`, 'err');
+      this.end(res, 'fail', `pasta inexistente: ${cwd}`);
       this.failed.push(label);
       this.finished(label);
       return;
     }
+    this.runner.capture = [];
     const code = await this.runner.exec(command, cwd, opts.timeoutSec ?? 0);
-    if (code === 0) this.runner.log(`OK: ${label}`, 'ok');
+    const output = `$ ${command}\n(pasta: ${cwd})\n\n${(this.runner.capture ?? []).join('\n')}\n\nexit code: ${code}`;
+    this.runner.capture = undefined;
+    if (code === 0) { this.runner.log(`OK: ${label}`, 'ok'); this.end(res, 'ok', output); }
     else if (!this.runner.isCancelled) {
       this.runner.log(`${opts.allowFail ? 'AVISO' : 'FAILED'}: ${label} (exit code ${code})`, 'err');
       if (!opts.allowFail) this.failed.push(`${label} (${code})`);
-    }
+      this.end(res, opts.allowFail ? 'warn' : 'fail', output);
+    } else this.end(res, 'warn', `${output}\n\n(cancelado)`);
     if (!this.runner.isCancelled) this.finished(label);
   }
 }

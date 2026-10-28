@@ -29,7 +29,7 @@ const fake = {
     showWarningMessage: async () => dialogs.warning,
     showQuickPick: async (items: any[]) => dialogs.quickPick?.(items),
     showOpenDialog: async () => (dialogs.open ? [{ fsPath: dialogs.open }] : undefined),
-    registerWebviewViewProvider: (t: string, p: unknown) => { if (t === 'pemWlTools.logs') logProvider = p; else viewProvider = p; return { dispose() {} }; },
+    registerWebviewViewProvider: (t: string, p: unknown) => { if (t === 'pemWlTools.logs') logProvider = p; else if (t === 'pemWlTools.panel') viewProvider = p; return { dispose() {} }; },
   },
   commands: {
     registerCommand: (id: string, fn: (...a: unknown[]) => unknown) => { commands.set(id, fn); return { dispose() {} }; },

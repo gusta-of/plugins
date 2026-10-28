@@ -1,5 +1,7 @@
 import * as fs from 'node:fs';
+import { ArtifactsView } from './artifactsView';
 import { LogChannel, LogHub } from './logHub';
+import { WlWatcher } from './wlStatus';
 import * as vscode from 'vscode';
 import * as M from './modules';
 import { Operations, BuildOptions, Paths } from './operations';
@@ -67,7 +69,11 @@ export function activate(context: vscode.ExtensionContext): void {
   const wlKeys = new Set<string>();
   runner.onFinished = unlockAll(runner, taskKeys);
   wlRunner.onFinished = unlockAll(wlRunner, wlKeys);
-  ops.onWebLogicExit = () => { locked.delete('startWebLogic'); statusItem.hide(); panel.pushState(); };
+  const wlWatch = new WlWatcher();
+  const artifacts = new ArtifactsView(runner, wlWatch);
+  ops.onWebLogicStart = (p) => wlWatch.start(p.domain);
+  ops.onWebLogicLine = (l) => wlWatch.feed(l, 'out');
+  ops.onWebLogicExit = () => { locked.delete('startWebLogic'); statusItem.hide(); wlWatch.stop(); panel.pushState(); };
 
   const err = (m: string) => { vscode.window.showErrorMessage(`PEM WL Tools: ${m}`); return undefined; };
 
@@ -174,6 +180,8 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('pemWlTools.cancel', () => { runner.cancel(); wlRunner.cancel(); }),
     vscode.window.registerWebviewViewProvider(PanelProvider.viewType, panel),
+    vscode.window.registerWebviewViewProvider(ArtifactsView.viewType, artifacts, { webviewOptions: { retainContextWhenHidden: true } }),
+    { dispose: () => wlWatch.stop() },
     vscode.window.registerWebviewViewProvider(LogHub.viewType, hub, { webviewOptions: { retainContextWhenHidden: true } }),
     hub,
     vscode.workspace.onDidChangeConfiguration((e) => { if (e.affectsConfiguration(SECTION)) panel.pushState(); }),

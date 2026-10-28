@@ -16,7 +16,11 @@ dependencies {
         // Compila contra a plataforma mais antiga suportada (2024.1); corre em 241+ (incl. 2025.x e 2026.x)
         intellijIdeaCommunity("2024.1.7")
     }
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.11.4")
 }
+
+tasks.test { useJUnitPlatform() }
 
 kotlin {
     compilerOptions {

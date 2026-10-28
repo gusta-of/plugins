@@ -47,6 +47,9 @@ class PemToolWindowFactory : ToolWindowFactory, DumbAware {
         val runner = TaskRunner(project, taskConsole)
         val wlRunner = TaskRunner(project, wlConsole)
         val ops = Operations(runner, wlRunner)
+        val wlWatch = WlWatcher()
+        ops.onWebLogicStart = { wlWatch.start(it.domain) }
+        ops.onWebLogicLine = { wlWatch.feed(it, "out") }
 
         // ---- campos ----
         val workspaceField = pathField(project, settings.workspacePath, "Pasta do workspace (ex.: PEM_Aplicacao)") { settings.workspacePath = it }
@@ -118,6 +121,7 @@ class PemToolWindowFactory : ToolWindowFactory, DumbAware {
         val tabs = JBTabbedPane().apply {
             addTab("Tarefas", taskConsole)
             addTab("WebLogic", wlConsole)
+            addTab("Artefactos", ArtifactsPanel(project, runner, wlWatch))
         }
 
         fun selectTab(title: String) {
@@ -172,7 +176,7 @@ class PemToolWindowFactory : ToolWindowFactory, DumbAware {
                 selectTab("WebLogic")
                 if (ops.weblogicRunning) lock(startBtn)
             }
-            ops.onWebLogicExit = { SwingUtilities.invokeLater { unlock(startBtn) } }
+            ops.onWebLogicExit = { wlWatch.stop(); SwingUtilities.invokeLater { unlock(startBtn) } }
             add(startBtn)
                 add(tb(AllIcons.Actions.Suspend, "WebLogic: Stop - gracioso e depois forca a paragem", wl = true, action = withPaths { ops.stopWebLogic(it) }))
                 add(tb(AllIcons.Actions.Cancel, "WebLogic: Kill - termina logo todos os processos do dominio (sem stop gracioso)", wl = true, action = withPaths { ops.killWebLogic(it) }))

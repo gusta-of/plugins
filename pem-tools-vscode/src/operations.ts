@@ -166,6 +166,9 @@ export async function terminate(procs: ProcInfo[], log: Log, graceMs = 10000): P
 export class Operations {
   private wl?: ChildProcess;
   onWebLogicExit: () => void = () => {};
+  /** arranque do WebLogic (para acompanhar os artefactos) e cada linha que ele escreve */
+  onWebLogicStart: (p: Paths) => void = () => {};
+  onWebLogicLine: (line: string) => void = () => {};
 
   constructor(readonly runner: TaskRunner, readonly wlRunner: TaskRunner, private readonly wlLog: Log) {}
 
@@ -312,7 +315,12 @@ export class Operations {
       ? spawn('cmd', ['/d', '/s', '/c', path.basename(script)], { cwd: bin, env, windowsVerbatimArguments: true, windowsHide: true })
       : spawn('bash', [script], { cwd: p.domain, env, detached: true });
     this.wl = child;
-    const out = (k: 'info' | 'err') => (c: Buffer) => this.wlLog(c.toString('utf8').replace(/\r?\n$/, ''), k);
+    this.onWebLogicStart(p);
+    const out = (k: 'info' | 'err') => (c: Buffer) => {
+      const text = c.toString('utf8').replace(/\r?\n$/, '');
+      this.wlLog(text, k);
+      for (const l of text.split(/\r?\n/)) this.onWebLogicLine(l);
+    };
     child.stdout?.on('data', out('info'));
     child.stderr?.on('data', out('err'));
     child.on('error', (e) => this.wlLog(`Falha a iniciar o WebLogic: ${e.message}`, 'err'));

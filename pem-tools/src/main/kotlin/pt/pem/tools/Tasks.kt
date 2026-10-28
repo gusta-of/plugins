@@ -11,6 +11,13 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 
+/** Resultado de um passo (para o separador «Artefactos»); [output] e a saida do passo, mostrada em «Ver erro». */
+class StepResult(val id: Int, val label: String) {
+    enum class Status { RUNNING, OK, FAIL, WARN }
+    @Volatile var status = Status.RUNNING
+    @Volatile var output = ""
+}
+
 /** Caminhos lidos dos campos da UI no momento do clique. */
 data class Paths(val workspace: Path, val domain: Path) {
     val upload: Path get() = domain.resolve("servers/AdminServer/upload")
@@ -30,6 +37,13 @@ class TaskRunner(private val project: Project, val console: LogPanel) {
     @Volatile var busy = false
         private set
     @Volatile private var cancelled = false
+
+    /** Resultados por passo da tarefa atual/ultima. */
+    val results = java.util.concurrent.CopyOnWriteArrayList<StepResult>()
+    @Volatile var resultsTitle = ""
+        private set
+    @Volatile var onResults: () -> Unit = {}
+    @Volatile private var lastCapture = ""
 
     /** (feitos, total, rotulo do passo atual). total == 0 -> indeterminado. Chamado fora da EDT. */
     /** Chamado (fora da EDT) quando uma tarefa termina, com sucesso ou nao. */
@@ -52,6 +66,9 @@ class TaskRunner(private val project: Project, val console: LogPanel) {
         }
         busy = true
         cancelled = false
+        results.clear()
+        resultsTitle = title
+        onResults()
         ApplicationManager.getApplication().executeOnPooledThread {
             val steps = Steps(total)
             onProgress(0, total, title)
@@ -72,6 +89,7 @@ class TaskRunner(private val project: Project, val console: LogPanel) {
                 steps.failed.forEach { log(" - $it", ConsoleViewContentType.ERROR_OUTPUT) }
             }
             onProgress(if (steps.failed.isEmpty() && !cancelled) total else steps.done, total, "")
+            onResults()
             onFinished()
         }
     }
@@ -86,16 +104,27 @@ class TaskRunner(private val project: Project, val console: LogPanel) {
             onProgress(done, total, label)
         }
 
+        private fun begin(label: String) = StepResult(results.size + 1, label).also { results += it; onResults() }
+
+        private fun end(r: StepResult, status: StepResult.Status, output: String) {
+            r.output = output
+            r.status = status
+            onResults()
+        }
+
         /** Passo em Kotlin (copias, apagar pastas, ...). */
         fun step(label: String, action: () -> Unit) {
             if (cancelled) return
             log("==> $label")
+            val res = begin(label)
             try {
                 action()
                 log("OK: $label")
+                end(res, StepResult.Status.OK, "")
             } catch (e: Exception) {
                 log("FAILED: $label (${e.message})", ConsoleViewContentType.ERROR_OUTPUT)
                 failed += label
+                end(res, StepResult.Status.FAIL, e.stackTraceToString())
             }
             finished(label)
         }
@@ -104,18 +133,22 @@ class TaskRunner(private val project: Project, val console: LogPanel) {
         fun shell(label: String, cwd: Path, command: String, timeoutSec: Int = 0, allowFail: Boolean = false) {
             if (cancelled) return
             log("==> $label")
+            val res = begin(label)
             if (!Files.isDirectory(cwd)) {
                 log("FAILED: $label (pasta inexistente: $cwd)", ConsoleViewContentType.ERROR_OUTPUT)
+                end(res, StepResult.Status.FAIL, "pasta inexistente: $cwd")
                 failed += label
                 finished(label)
                 return
             }
             val code = execute(command, cwd, timeoutSec)
-            if (code == 0) log("OK: $label")
+            val output = "$ $command\n(pasta: $cwd)\n\n$lastCapture\n\nexit code: $code"
+            if (code == 0) { log("OK: $label"); end(res, StepResult.Status.OK, output) }
             else if (!cancelled) {
                 log("${if (allowFail) "AVISO" else "FAILED"}: $label (exit code $code)", ConsoleViewContentType.ERROR_OUTPUT)
                 if (!allowFail) failed += "$label ($code)"
-            }
+                end(res, if (allowFail) StepResult.Status.WARN else StepResult.Status.FAIL, output)
+            } else end(res, StepResult.Status.WARN, "$output\n\n(cancelado)")
             if (!cancelled) finished(label)
         }
     }
@@ -127,6 +160,15 @@ class TaskRunner(private val project: Project, val console: LogPanel) {
             .also { applyJavaEnv(it) }
         val handler = OSProcessHandler(cmd)
         current = handler
+        val buf = StringBuilder()
+        handler.addProcessListener(object : com.intellij.execution.process.ProcessListener {
+            override fun onTextAvailable(event: com.intellij.execution.process.ProcessEvent, outputType: com.intellij.openapi.util.Key<*>) {
+                synchronized(buf) {
+                    buf.append(ANSI.replace(event.text, ""))
+                    if (buf.length > MAX_CAPTURE) buf.delete(0, buf.length - MAX_CAPTURE)
+                }
+            }
+        })
         console.attachToProcess(handler)
         handler.startNotify()
         if (timeoutSec > 0) {
@@ -134,15 +176,19 @@ class TaskRunner(private val project: Project, val console: LogPanel) {
                 log("Timeout de ${timeoutSec}s: a terminar o comando.", ConsoleViewContentType.ERROR_OUTPUT)
                 handler.destroyProcess()
                 handler.waitFor(5000)
+                lastCapture = synchronized(buf) { buf.toString() }
                 return -1
             }
         } else {
             handler.waitFor()
         }
+        lastCapture = synchronized(buf) { buf.toString() }
         return handler.process.exitValue()
     }
 
     companion object {
+        private const val MAX_CAPTURE = 400_000
+        private val ANSI = Regex("\u001b\\[[0-9;]*[A-Za-z]")
         private const val DEFAULT_JAVA_HOME = "/opt/jdk1.8.0_202"
         private const val DEFAULT_MAVEN_BIN = "/opt/apache-maven-3.9.9/bin"
 

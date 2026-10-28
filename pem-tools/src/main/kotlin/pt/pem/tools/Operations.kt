@@ -15,6 +15,10 @@ class Operations(private val runner: TaskRunner, private val wlRunner: TaskRunne
     /** Chamado quando o processo iniciado por startWebLogic termina. */
     @Volatile var onWebLogicExit: () -> Unit = {}
 
+    /** Arranque do WebLogic (para acompanhar os artefactos) e cada linha que ele escreve. */
+    @Volatile var onWebLogicStart: (Paths) -> Unit = {}
+    @Volatile var onWebLogicLine: (String) -> Unit = {}
+
 
     /** Lido a cada build: acrescenta -Dmaven.test.skip=true. */
     var skipTests: () -> Boolean = { false }
@@ -183,6 +187,19 @@ class Operations(private val runner: TaskRunner, private val wlRunner: TaskRunne
             .also { TaskRunner.applyJavaEnv(it) }
         val handler = OSProcessHandler(cmd)
         wlHandler = handler
+        onWebLogicStart(p)
+        val partial = StringBuilder()
+        handler.addProcessListener(object : com.intellij.execution.process.ProcessListener {
+            override fun onTextAvailable(event: com.intellij.execution.process.ProcessEvent, outputType: com.intellij.openapi.util.Key<*>) {
+                partial.append(event.text)
+                var i = partial.indexOf("\n")
+                while (i >= 0) {
+                    onWebLogicLine(partial.substring(0, i).trimEnd('\r'))
+                    partial.delete(0, i + 1)
+                    i = partial.indexOf("\n")
+                }
+            }
+        })
         wlConsole.attachToProcess(handler)
         handler.addProcessListener(object : com.intellij.execution.process.ProcessListener {
             override fun processTerminated(event: com.intellij.execution.process.ProcessEvent) = onWebLogicExit()
