@@ -45,6 +45,7 @@
       { "command": "oraStudio.rollback", "title": "Ora Studio: Rollback" },
       { "command": "oraStudio.toggleAutoCommit", "title": "Ora Studio: Alternar auto-commit" },
       { "command": "oraStudio.selectConnection", "title": "Ora Studio: Associar este ficheiro a uma ligação…" },
+      { "command": "oraStudio.showError", "title": "Ora Studio: Mostrar erro completo" },
       { "command": "oraStudio.selectSchema", "title": "Ora Studio: Escolher o schema desta consola…", "icon": "$(symbol-namespace)" },
       { "command": "oraStudio.goToObject", "title": "Ora Studio: Ir para objeto…", "icon": "$(search)" },
       { "command": "oraStudio.openObject", "title": "Abrir" },

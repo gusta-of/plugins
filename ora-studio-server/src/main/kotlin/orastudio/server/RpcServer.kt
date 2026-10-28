@@ -100,7 +100,7 @@ class RpcServer(private val input: InputStream, output: OutputStream) {
         } catch (t: Throwable) {
             val e = orastudio.DbError.of(t)
             AppLog.error("Erro no pedido $method", t)
-            send(mapOf("id" to id, "error" to mapOf("message" to e.message.ifBlank { t.toString() }, "code" to e.code)))
+            send(mapOf("id" to id, "error" to mapOf("message" to e.message.ifBlank { t.toString() }, "code" to e.code, "stack" to t.stackTraceToString())))
         }
     }
 

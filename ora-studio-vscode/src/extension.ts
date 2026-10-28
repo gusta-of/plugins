@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ConnectionEditor } from './connectionEditor';
+import { showErrorBox } from './errorBox';
 import { ConsoleManager } from './consoles';
 import { Core, errText } from './core';
 import { findJava } from './java';
@@ -192,6 +193,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     cmd('oraStudio.copyName', (n?: Node) => { const o = nodeObject(n); if (o) return vscode.env.clipboard.writeText(`${o.ref.owner}.${o.ref.name}`); }),
     cmd('oraStudio.configureDrivers', configureDrivers),
+    cmd('oraStudio.showError', (title: string, text: string) => showErrorBox(title, text)),
     cmd('oraStudio.showLog', () => log.show()),
 
     vscode.languages.registerCodeLensProvider([{ language: 'oraclesql' }, { language: 'sql' }], consoles),

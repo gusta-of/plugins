@@ -4,7 +4,7 @@ import * as readline from 'node:readline';
 export type NotificationHandler = (method: string, params: any) => void;
 
 export class RpcError extends Error {
-  constructor(message: string, readonly code = 0) {
+  constructor(message: string, readonly code = 0, readonly stackTrace?: string) {
     super(message);
   }
 }
@@ -71,7 +71,7 @@ export class SidecarClient {
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
-      if (msg.error) p.reject(new RpcError(msg.error.message ?? 'erro', msg.error.code ?? 0));
+      if (msg.error) p.reject(new RpcError(msg.error.message ?? 'erro', msg.error.code ?? 0, msg.error.stack));
       else p.resolve(msg.result);
     } else if (msg.method) {
       for (const h of this.handlers) {

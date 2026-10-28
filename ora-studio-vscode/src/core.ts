@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { fullErrorText, showErrorBox } from './errorBox';
 import { ConnDto, DriverDto } from './model';
 import { SidecarClient } from './rpc';
 
@@ -57,7 +58,8 @@ export class Core {
       return true;
     } catch (e) {
       this.passwords.delete(id);
-      this._onState.fire(id);
+      // não dispara onConnectionState: o estado não mudou e isso faria a árvore tentar ligar de novo (ficava a rodar)
+      showErrorBox(`Falha a ligar a ${this.connName(id)}`, fullErrorText(e));
       throw e;
     }
   }

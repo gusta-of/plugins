@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { fullErrorText } from './errorBox';
 import { Core, errText } from './core';
 import { BROWSABLE_TYPES, ConnDto, ObjRef, TYPE_ICON, TYPE_LABEL, TYPE_PLURAL, isRelation } from './model';
 
@@ -7,7 +8,7 @@ export type Node =
   | { kind: 'schema'; connId: string; name: string; current: boolean }
   | { kind: 'category'; connId: string; owner: string; type: string }
   | { kind: 'object'; connId: string; ref: ObjRef; valid: boolean }
-  | { kind: 'message'; text: string; error?: boolean };
+  | { kind: 'message'; text: string; error?: boolean; detail?: string };
 
 /** Árvore: Ligação › Schema › Categoria (Tabelas, Views, ...) › Objeto, com carregamento ao expandir. */
 export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
@@ -68,6 +69,7 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
       case 'message': {
         const it = new vscode.TreeItem(n.text, vscode.TreeItemCollapsibleState.None);
         it.iconPath = n.error ? new vscode.ThemeIcon('error', new vscode.ThemeColor('errorForeground')) : undefined;
+        if (n.detail) { it.tooltip = n.detail; it.command = { command: 'oraStudio.showError', title: 'Ver erro completo', arguments: ['Erro', n.detail] }; }
         return it;
       }
     }
@@ -109,7 +111,7 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
         this.errors.set(n.conn.id, errText(e));
         this.core.connected.delete(n.conn.id);
       }
-      return [{ kind: 'message', text: errText(e).split('\n')[0], error: true }];
+      return [{ kind: 'message', text: errText(e).split('\n')[0] + '  (clique para ver tudo)', error: true, detail: fullErrorText(e) }];
     }
   }
 }
