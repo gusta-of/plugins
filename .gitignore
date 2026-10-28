@@ -1,2 +1,5 @@
 *dist/
 dist/*
+
+# saída de IDE/compilação
+bin/
