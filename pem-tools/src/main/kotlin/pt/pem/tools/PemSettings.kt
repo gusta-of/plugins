@@ -17,6 +17,14 @@ class PemSettings : PersistentStateComponent<PemSettings.Data> {
         var skipTests: Boolean = false
         var localMock: Boolean = false
         var threads: String = "1C"
+        /** regras de realce dos logs (JSON); vazio = predefinicoes */
+        var highlightRules: String = ""
+        /** parametros extra do mvn: `*` = todos os modulos, ou o nome do modulo */
+        var mavenArgs: MutableMap<String, String> = HashMap()
+        /** tamanho da fonte das consolas de log (pt) */
+        var logFontSize: Int = 12
+        /** quebra de linha nas consolas de log */
+        var logWrap: Boolean = true
     }
 
     private var data = Data()

@@ -7,6 +7,25 @@ export interface ObjRef {
   type: string;
 }
 
+/** Job agendado (DBMS_SCHEDULER ou DBMS_JOB), como o devolve o servidor. */
+export interface JobDto {
+  kind: 'scheduler' | 'dbms_job';
+  owner: string;
+  name: string;
+  enabled: boolean;
+  state: string;
+  schedule: string;
+  nextRun: string;
+  lastRun: string;
+  lastDuration: string;
+  jobType: string;
+  action: string;
+  failures: number;
+  comments: string;
+}
+
+export interface JobRunDto { startedAt: string; status: string; duration: string; errorCode: number; info: string }
+
 export interface ConnDto {
   id: string;
   name: string;

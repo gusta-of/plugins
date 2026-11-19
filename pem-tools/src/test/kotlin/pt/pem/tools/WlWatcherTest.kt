@@ -40,7 +40,9 @@ class WlWatcherTest {
         // um artefacto que falhou nao volta a "pronto" por uma transicao posterior
         w.feed("<BEA-149060> <Module integration-portlet of application integration-portlet successfully transitioned from STATE_ADMIN to STATE_ACTIVE on server AdminServer.>")
         assertEquals(AppState.FAILED, w.snapshot().first { it.name == "integration-portlet" }.state)
-        assertEquals(WlCounts(1, 1, 1, 3), w.counts())
+        // RUNNING: "liferay" nunca escreveu transicoes (nao foi redeployado) e fica pronto; o falhado mantem-se
+        assertEquals(AppState.READY, w.snapshot().first { it.name == "liferay" }.state)
+        assertEquals(WlCounts(2, 0, 1, 3), w.counts())
         w.stop()
     }
 
@@ -59,6 +61,26 @@ class WlWatcherTest {
         Files.writeString(f, "<BEA-149060> <Module liferay of application liferay successfully transitioned from STATE_ADMIN to STATE_ACTIVE on server AdminServer.>\n")
         Thread.sleep(2300)
         assertEquals(AppState.READY, w.snapshot().first { it.name == "liferay" }.state)
+        w.stop()
+    }
+
+    @Test fun `artefactos em liferay deploy so ficam prontos com o sinal proprio`() {
+        assertEquals("pem-crd-portlet", warAppName("pem-crd-portlet-2.3.0.war"))
+        assertEquals("liferay-theme", warAppName("liferay-theme.war"))
+        val d = domain()
+        Files.createDirectories(d.resolve("liferay/deploy"))
+        listOf("pem-crd-portlet-2.3.0.war", "pem-med-portlet-2.3.0.war", "readme.txt").forEach { Files.writeString(d.resolve("liferay/deploy/$it"), "") }
+        assertEquals(listOf("pem-crd-portlet", "pem-med-portlet"), hotDeployApps(d).sorted())
+        val w = WlWatcher()
+        w.start(d)
+        assertEquals(listOf("integration-portlet", "liferay", "pem-crd-portlet", "pem-med-portlet"), w.snapshot().map { it.name }.sorted())
+        w.feed("<Notice> <WebLogicServer> <BEA-000365> <Server state changed to RUNNING.>")
+        fun st(n: String) = w.snapshot().first { it.name == n }.state
+        assertEquals(AppState.READY, st("liferay"))
+        assertTrue(st("pem-crd-portlet") != AppState.READY)
+        w.feed("<BEA-149060> <Module pem-crd-portlet of application pem-crd-portlet successfully transitioned from STATE_ADMIN to STATE_ACTIVE on server AdminServer.>")
+        assertEquals(AppState.READY, st("pem-crd-portlet"))
+        assertTrue(st("pem-med-portlet") != AppState.READY)
         w.stop()
     }
 }

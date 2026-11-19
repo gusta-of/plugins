@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { fullErrorText, showErrorBox } from './errorBox';
-import { ConnDto, DriverDto } from './model';
+import { ConnDto, DriverDto, JobDto } from './model';
 import { SidecarClient } from './rpc';
 
 /** Estado partilhado da extensão: cliente do servidor, ligações em cache e quais estão ligadas. */
@@ -10,6 +10,8 @@ export class Core {
   configDir = '';
   readonly connected = new Set<string>();
   readonly currentSchema = new Map<string, string>();
+  /** jobs carregados por ligação (para o documento de detalhe) */
+  readonly jobs = new Map<string, JobDto[]>();
   /** schema escolhido por consola (uri do documento → schema); sem entrada = o do próprio utilizador */
   readonly docSchema = new Map<string, string>();
   private readonly passwords = new Map<string, string>();

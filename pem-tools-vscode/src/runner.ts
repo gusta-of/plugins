@@ -1,4 +1,5 @@
 import { ChildProcess, spawn } from 'node:child_process';
+import { Diagnosis, diagnoseBuild } from './diagnose';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 
@@ -72,6 +73,9 @@ export class TaskRunner {
   results: StepResult[] = [];
   resultsTitle = '';
   onResults: () => void = () => {};
+  /** falha conhecida detetada num passo (avisada depois de a tarefa acabar, já sem estar ocupado) */
+  onDiagnosis: (d: Diagnosis, cwd: string) => void = () => {};
+  pendingDiagnosis?: { d: Diagnosis; cwd: string };
   /** linhas do comando em curso (para o «Ver erro» do passo) */
   capture?: string[];
 
@@ -119,6 +123,9 @@ export class TaskRunner {
     this.onProgress({ done: this.cancelled || steps.failed.length ? steps.done : total, total, label: '', finished: true });
     this.onResults();
     this.onFinished();
+    const pend = this.pendingDiagnosis;
+    this.pendingDiagnosis = undefined;
+    if (pend && !this.cancelled) this.onDiagnosis(pend.d, pend.cwd);
     return true;
   }
 
@@ -204,7 +211,11 @@ export class Steps {
     if (code === 0) { this.runner.log(`OK: ${label}`, 'ok'); this.end(res, 'ok', output); }
     else if (!this.runner.isCancelled) {
       this.runner.log(`${opts.allowFail ? 'AVISO' : 'FAILED'}: ${label} (exit code ${code})`, 'err');
-      if (!opts.allowFail) this.failed.push(`${label} (${code})`);
+      if (!opts.allowFail) {
+        this.failed.push(`${label} (${code})`);
+        const d = diagnoseBuild(output);
+        if (d) { this.runner.log(`DIAGNÓSTICO: ${d.summary}`, 'warn'); this.runner.pendingDiagnosis = { d, cwd }; }
+      }
       this.end(res, opts.allowFail ? 'warn' : 'fail', output);
     } else this.end(res, 'warn', `${output}\n\n(cancelado)`);
     if (!this.runner.isCancelled) this.finished(label);

@@ -15,10 +15,13 @@ export interface BuildOptions {
   skipTests: boolean;
   localMock: boolean;
   threads: string;
+  /** parâmetros extra do mvn: «*» para todos os builds e o nome do módulo para um só */
+  mavenArgs?: M.MavenArgs;
 }
 
 const LOCAL_MOCK_MODULE = 'pem-common-domain';
 const LOCAL_MOCK_PROFILE = 'localMock';
+const FAST_BUILD_PROFILE = 'fast-build';
 
 // ---------------------------------------------------------------- helpers de ficheiros ----
 
@@ -221,14 +224,40 @@ export class Operations {
     });
   }
 
+  // ---- git ----
+
+  /**
+   * Volta a empacotar o repositório do workspace em packs `pack-*` normais (que o JGit do git-commit-id-plugin lê)
+   * e remove o multi-pack-index. Não apaga histórico: só junta os objetos e tira os packs redundantes.
+   */
+  repairGit(p: Paths, hash?: string) {
+    return this.runner.run('Reparar repositório git (repack)', hash ? 4 : 3, async (s) => {
+      await s.shell('git repack -a -d', p.workspace, 'git repack -a -d');
+      await s.step('Remover multi-pack-index', async () => {
+        const rel = await gitOut(p.workspace, ['rev-parse', '--git-path', 'objects/pack/multi-pack-index']);
+        const f = path.resolve(p.workspace, rel);
+        fs.rmSync(f, { force: true });
+        this.runner.log(`Removido (se existia): ${f}`);
+      });
+      await s.shell('git prune-packed', p.workspace, 'git prune-packed');
+      if (hash && /^[0-9a-f]{7,40}$/.test(hash)) await s.shell(`Verificar o objeto ${hash.slice(0, 10)}`, p.workspace, `git cat-file -t ${hash}`);
+      this.runner.log('Se o git maintenance voltar a criar packs «loose-*», repete esta operação (ou usa «Parâmetros Maven» com -Dmaven.gitcommitid.skip=true).');
+    });
+  }
+
   // ---- build ----
 
   buildCommand(step: M.BuildStep, o: BuildOptions): string {
     const profiles = o.profile.split(',').map((x) => x.trim()).filter(Boolean);
     if (step.dir === LOCAL_MOCK_MODULE && o.localMock && !profiles.includes(LOCAL_MOCK_PROFILE)) profiles.push(LOCAL_MOCK_PROFILE);
+    // O pem/pom.xml fixa <skipTests>false</skipTests> no surefire/failsafe, o que ganha a qualquer -D da linha de
+    // comandos: só o perfil «fast-build» (que desliga surefire, failsafe e jacoco) garante que os testes não correm.
+    const skipping = step.withProfile && o.skipTests;
+    if (skipping && !profiles.includes(FAST_BUILD_PROFILE)) profiles.push(FAST_BUILD_PROFILE);
     const prof = step.withProfile && profiles.length ? ` -P${profiles.join(',')}` : '';
-    const skip = step.withProfile && o.skipTests ? ' -Dmaven.test.skip=true' : '';
-    return `mvn ${step.goals}${prof}${skip}`;
+    const skip = skipping ? ' -DskipTests -DskipITs -Dmaven.test.skip=true' : '';
+    const extra = M.mavenArgsFor(step.label, o.mavenArgs);
+    return `mvn ${step.goals}${prof}${skip}${extra ? ' ' + extra : ''}`;
   }
 
   private async runBuild(s: Steps, p: Paths, step: M.BuildStep, o: BuildOptions) {
@@ -236,8 +265,11 @@ export class Operations {
   }
 
   buildBackend(p: Paths, o: BuildOptions) {
-    const steps = M.backendBuild();
-    return this.runner.run('Build Backend', steps.length, async (s) => { for (const st of steps) await this.runBuild(s, p, st, o); });
+    const steps = M.backendBuildOrdered(p.workspace, (rest) => this.runner.log(`AVISO: ciclo de dependências entre ${rest.join(', ')}; a usar a ordem fixa.`, 'err'));
+    return this.runner.run('Build Backend', steps.length, async (s) => {
+      this.runner.log(`Ordem de build (pelas dependências dos pom.xml): ${steps.filter((x) => x.withProfile).map((x) => x.label).join(' → ')}`);
+      for (const st of steps) await this.runBuild(s, p, st, o);
+    });
   }
 
   buildFrontend(p: Paths, o: BuildOptions, fast: boolean) {
@@ -246,8 +278,23 @@ export class Operations {
       async (s) => { for (const st of steps) await this.runBuild(s, p, st, o); });
   }
 
-  buildModules(p: Paths, entries: M.ModuleEntry[], o: BuildOptions) {
+  /** Backend (ordenado pelas dependências) e a seguir o frontend, numa só tarefa; para no primeiro erro. */
+  buildAll(p: Paths, o: BuildOptions) {
+    const be = M.backendBuildOrdered(p.workspace, (rest) => this.runner.log(`AVISO: ciclo de dependências entre ${rest.join(', ')}; a usar a ordem fixa.`, 'err'));
+    const fe = M.frontendBuild(false, o.threads);
+    return this.runner.run('Build Backend + Frontend', be.length + fe.length, async (s) => {
+      this.runner.log(`Backend (pelas dependências dos pom.xml): ${be.filter((x) => x.withProfile).map((x) => x.label).join(' → ')}`);
+      for (const st of be) await this.runBuild(s, p, st, o);
+      this.runner.log('Backend concluído — a seguir o frontend.');
+      for (const st of fe) await this.runBuild(s, p, st, o);
+    });
+  }
+
+  buildModules(p: Paths, raw: M.ModuleEntry[], o: BuildOptions) {
+    // o que o utilizador escolhe pode vir em qualquer ordem: o backend é ordenado pelas dependências dos pom.xml
+    const entries = M.orderEntries(p.workspace, raw);
     return this.runner.run(entries.length === 1 ? `Build ${entries[0].name}` : `Build de ${entries.length} módulos`, entries.length, async (s) => {
+      if (entries.length > 1) this.runner.log(`Ordem de build (pelas dependências): ${entries.map((e) => e.name).join(' → ')}`);
       for (const e of entries) {
         const step = e.kind === 'backend' ? M.backendBuild().find((x) => x.label === e.name)! : M.frontendModuleBuild(e.name);
         await this.runBuild(s, p, step, o);
@@ -284,6 +331,28 @@ export class Operations {
 
   deployFrontend(p: Paths, modules: string[]) {
     return this.runner.run('Deploy Frontend', modules.length, async (s) => { for (const m of modules) await this.deployFrontendOne(s, p, m); });
+  }
+
+  /** Módulos de deploy que já têm artefacto (war/jar) no target/: os outros ficam de fora. */
+  deployableAll(p: Paths): { entries: M.ModuleEntry[]; skipped: string[] } {
+    const entries: M.ModuleEntry[] = [];
+    const skipped: string[] = [];
+    for (const e of M.deployEntries()) {
+      try {
+        if (e.kind === 'backend') findArtifact(path.join(p.workspace, e.name, 'target'), e.name, e.name === M.JAR_MODULE ? 'jar' : 'war');
+        else findArtifact(path.join(p.workspace, 'spms-plugins', M.frontendDeploy[e.name], e.name, 'target'), e.name, 'war');
+        entries.push(e);
+      } catch { skipped.push(e.name); }
+    }
+    return { entries, skipped };
+  }
+
+  /** Deploy de tudo o que foi construído: backend e depois frontend. */
+  deployAll(p: Paths, entries: M.ModuleEntry[], skipped: string[]) {
+    return this.runner.run(`Deploy Backend + Frontend (${entries.length} módulos)`, entries.length, async (s) => {
+      if (skipped.length) this.runner.log(`Sem artefacto (não construídos), ignorados: ${skipped.join(', ')}`, 'warn');
+      for (const e of entries) await (e.kind === 'backend' ? this.deployBackendOne(s, p, e.name) : this.deployFrontendOne(s, p, e.name));
+    });
   }
 
   deployModules(p: Paths, entries: M.ModuleEntry[]) {
@@ -365,4 +434,10 @@ export class Operations {
 
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function gitOut(cwd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, { cwd, windowsHide: true }, (err, stdout, stderr) => (err ? reject(new Error(stderr.trim() || err.message)) : resolve(stdout.trim())));
+  });
 }

@@ -45,6 +45,10 @@ class TaskRunner(private val project: Project, val console: LogPanel) {
     @Volatile var onResults: () -> Unit = {}
     @Volatile private var lastCapture = ""
 
+    /** Falha conhecida detetada num passo: avisada depois de a tarefa acabar (ja sem estar ocupada). Fora da EDT. */
+    @Volatile var onDiagnosis: (Diagnosis) -> Unit = {}
+    @Volatile private var pendingDiagnosis: Diagnosis? = null
+
     /** (feitos, total, rotulo do passo atual). total == 0 -> indeterminado. Chamado fora da EDT. */
     /** Chamado (fora da EDT) quando uma tarefa termina, com sucesso ou nao. */
     @Volatile var onFinished: () -> Unit = {}
@@ -91,6 +95,7 @@ class TaskRunner(private val project: Project, val console: LogPanel) {
             onProgress(if (steps.failed.isEmpty() && !cancelled) total else steps.done, total, "")
             onResults()
             onFinished()
+            pendingDiagnosis?.let { d -> pendingDiagnosis = null; if (!cancelled) onDiagnosis(d) }
         }
     }
 
@@ -146,7 +151,13 @@ class TaskRunner(private val project: Project, val console: LogPanel) {
             if (code == 0) { log("OK: $label"); end(res, StepResult.Status.OK, output) }
             else if (!cancelled) {
                 log("${if (allowFail) "AVISO" else "FAILED"}: $label (exit code $code)", ConsoleViewContentType.ERROR_OUTPUT)
-                if (!allowFail) failed += "$label ($code)"
+                if (!allowFail) {
+                    failed += "$label ($code)"
+                    BuildDiagnosis.diagnose(output)?.let { d ->
+                        log("DIAGNOSTICO: ${d.summary}", ConsoleViewContentType.ERROR_OUTPUT)
+                        pendingDiagnosis = d
+                    }
+                }
                 end(res, if (allowFail) StepResult.Status.WARN else StepResult.Status.FAIL, output)
             } else end(res, StepResult.Status.WARN, "$output\n\n(cancelado)")
             if (!cancelled) finished(label)

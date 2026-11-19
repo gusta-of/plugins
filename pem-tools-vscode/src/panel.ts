@@ -101,15 +101,19 @@ export class PanelProvider implements vscode.WebviewViewProvider {
   ${group('Limpeza',
     btn('clearClasspath', 'trash', 'Limpar cache/classpath (clear_classpath.sh): cache WL, targets, ~/.m2 pem. O servidor tem de estar PARADO'),
     btn('cleanTargets', 'clear-all', 'Limpar pastas target/ (clean-targets.sh)'),
+    btn('repairGit', 'repo', 'Reparar o repositório git do workspace (git repack) — corrige «Missing tree» do git-commit-id-plugin'),
     btn('killJars', 'debug-disconnect', 'Matar processos java dos módulos (kill-module-jars.sh)'))}
   ${group('Build',
     btn('buildBackend', 'tools', 'Build Backend (build-backend.sh)', 'BE'),
     btn('buildFrontend', 'tools', 'Build Frontend (mvn clean install em spms-plugins)', 'FE'),
     btn('buildFrontendFast', 'tools', 'Build Frontend rápido (usa o campo Threads -T; padrão 1C)', 'FE⚡'),
+    btn('buildAll', 'rocket', 'Build Backend + Frontend de uma vez (backend ordenado pelas dependências; depois o frontend)', 'BE+FE'),
+    btn('mavenParams', 'settings-gear', 'Parâmetros Maven por módulo (ex.: -Dmaven.gitcommitid.skip=true) — abre um ecrã para editar'),
     btn('buildModules', 'symbol-module', 'Build de módulos isolados (vários; backend e/ou frontend)…'))}
   ${group('Deploy',
     btn('deployBackend', 'cloud-upload', 'Deploy Backend (vários módulos)…', 'BE'),
     btn('deployFrontend', 'cloud-upload', 'Deploy Frontend (vários módulos)…', 'FE'),
+    btn('deployAll', 'rocket', 'Deploy Backend + Frontend de tudo o que está construído (pede confirmação; ignora módulos sem artefacto)', 'BE+FE'),
     btn('deployModules', 'symbol-module', 'Deploy de módulos isolados (vários; backend e/ou frontend)…'))}
   ${group('Tarefa', btn('cancel', 'stop-circle', 'Cancelar a tarefa em curso'))}
   <div id="barBox"><div id="bar"></div></div>

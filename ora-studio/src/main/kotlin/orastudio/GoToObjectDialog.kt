@@ -17,12 +17,17 @@ import javax.swing.JPanel
 import javax.swing.JPasswordField
 import javax.swing.JScrollPane
 import javax.swing.JTextField
+import javax.swing.JToggleButton
 import javax.swing.Timer
 
 /** Ir para objecto (Ctrl+N): pesquisa por nome nos objectos visiveis para a ligacao. */
 class GoToObjectDialog(owner: Window?, private val handle: ConnectionHandle, private val open: (ObjectRef) -> Unit) : JDialog(owner, "Ir para objecto — ${handle.name}", ModalityType.APPLICATION_MODAL) {
 
     private val field = JTextField()
+    // como a pesquisa do editor: Aa (maiusculas), ab (palavra inteira) e .* (expressao regular); lembradas durante a sessao
+    private val btnCase = JToggleButton("Aa", lastOpts.matchCase).apply { toolTipText = "Maiúsculas/minúsculas" }
+    private val btnWord = JToggleButton("ab", lastOpts.wholeWord).apply { toolTipText = "Palavra inteira (sem regex: nome exato; * é curinga)" }
+    private val btnRegex = JToggleButton(".*", lastOpts.regex).apply { toolTipText = "Expressão regular (Oracle: \\w \\d \\s, [..], (a|b); \\b é traduzido)" }
     private val model = DefaultListModel<SearchHit>()
     private val list = JList(model)
     private val status = JLabel(" ")
@@ -40,6 +45,7 @@ class GoToObjectDialog(owner: Window?, private val handle: ConnectionHandle, pri
             }
         }
         field.document.addDocumentListener(doc { timer.restart() })
+        for (b in listOf(btnCase, btnWord, btnRegex)) b.addActionListener { lastOpts = currentOpts(); timer.restart() }
         field.addKeyListener(object : KeyAdapter() {
             override fun keyPressed(e: KeyEvent) {
                 when (e.keyCode) {
@@ -53,7 +59,10 @@ class GoToObjectDialog(owner: Window?, private val handle: ConnectionHandle, pri
         list.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) { if (e.clickCount == 2) choose() }
         })
-        contentPane.add(field, BorderLayout.NORTH)
+        contentPane.add(JPanel(BorderLayout(4, 0)).apply {
+            add(field, BorderLayout.CENTER)
+            add(JPanel(java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, 2, 0)).apply { add(btnCase); add(btnWord); add(btnRegex) }, BorderLayout.EAST)
+        }, BorderLayout.NORTH)
         contentPane.add(JScrollPane(list), BorderLayout.CENTER)
         contentPane.add(status, BorderLayout.SOUTH)
         (contentPane as JPanel).border = BorderFactory.createEmptyBorder(8, 8, 8, 8)
@@ -61,17 +70,23 @@ class GoToObjectDialog(owner: Window?, private val handle: ConnectionHandle, pri
         setLocationRelativeTo(owner)
     }
 
+    private fun currentOpts() = MetadataService.SearchOptions(regex = btnRegex.isSelected, matchCase = btnCase.isSelected, wholeWord = btnWord.isSelected)
+
     private fun search() {
         val q = field.text.trim()
         if (q.length < 2) { model.clear(); status.text = "Escreve pelo menos 2 caracteres"; return }
         val my = ++seq
         status.text = "A pesquisar…"
-        Bg.run({ handle.metadata.search(q, handle.currentSchema) }, { if (my == seq) status.text = it.shortMessage().lineSequence().first() }) { hits ->
+        Bg.run({ handle.metadata.search(q, handle.currentSchema, opts = currentOpts()) }, { if (my == seq) status.text = it.shortMessage().lineSequence().first() }) { hits ->
             if (my != seq) return@run
             model.clear(); hits.forEach { model.addElement(it) }
             if (model.size() > 0) list.selectedIndex = 0
             status.text = "${hits.size} resultado(s)"
         }
+    }
+
+    companion object {
+        private var lastOpts = MetadataService.SearchOptions()
     }
 
     private fun choose() {

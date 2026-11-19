@@ -64,6 +64,10 @@
         "title": "PEM WL: Limpar pastas target/"
       },
       {
+        "command": "pemWlTools.repairGit",
+        "title": "PEM WL: Reparar repositório git (repack)"
+      },
+      {
         "command": "pemWlTools.killJars",
         "title": "PEM WL: Matar processos java dos módulos"
       },
@@ -80,6 +84,14 @@
         "title": "PEM WL: Build Frontend rápido (-T)"
       },
       {
+        "command": "pemWlTools.buildAll",
+        "title": "PEM WL: Build Backend + Frontend"
+      },
+      {
+        "command": "pemWlTools.mavenParams",
+        "title": "PEM WL: Parâmetros Maven por módulo…"
+      },
+      {
         "command": "pemWlTools.buildModules",
         "title": "PEM WL: Build de módulos isolados…"
       },
@@ -90,6 +102,10 @@
       {
         "command": "pemWlTools.deployFrontend",
         "title": "PEM WL: Deploy Frontend…"
+      },
+      {
+        "command": "pemWlTools.deployAll",
+        "title": "PEM WL: Deploy Backend + Frontend"
       },
       {
         "command": "pemWlTools.deployModules",
@@ -144,6 +160,27 @@
             "16"
           ],
           "description": "Threads do Build Frontend rápido (mvn -T)."
+        },
+        "pemWlTools.mavenArgs": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": "string" },
+          "description": "Parâmetros extra do mvn nos builds. A chave «*» vale para todos os módulos; as outras são o nome do módulo (ex.: pem-bkf-domain). Edita-se no botão de engrenagem da secção Build."
+        },
+        "pemWlTools.highlightRules": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "description": "Regras de realce de cores dos logs (editadas no botão «Realce» da vista Logs). null = predefinições."
+        },
+        "pemWlTools.logFontSize": {
+          "type": "number",
+          "default": 12,
+          "minimum": 8,
+          "maximum": 28,
+          "description": "Tamanho da fonte dos logs (px)."
         }
       }
     }

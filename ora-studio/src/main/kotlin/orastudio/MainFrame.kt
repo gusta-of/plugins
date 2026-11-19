@@ -259,6 +259,12 @@ class MainPanel(closeInTitle: Boolean? = null) : JPanel(BorderLayout()), AppCont
         addTab(key, "${ref.name}", Icons.of(ref.type), "${ref.qualified}  [${ref.type.label}] — ${handle.name}", panel)
     }
 
+    override fun openJob(handle: ConnectionHandle, job: JobInfo) {
+        val key = "job:${handle.config.id}:${job.kind}:${job.owner}.${job.name}"
+        existing(key)?.let { selectOrFront(it); return }
+        addTab(key, job.name, Icons.jobOn, "${job.owner}.${job.name} — ${handle.name}", JobViewerPanel(this, handle, job))
+    }
+
     override fun openConsole(handle: ConnectionHandle, text: String?) {
         if (handle.needsPassword() && !passwordFor(handle)) return
         consoleCount++

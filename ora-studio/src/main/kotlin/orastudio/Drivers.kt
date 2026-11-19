@@ -80,6 +80,8 @@ object Drivers {
             setProperty("defaultRowPrefetch", "100")
             // "break" dentro do fluxo normal (o OOB nao atravessa NAT/proxies/docker): permite cancelar consultas
             setProperty("oracle.net.disableOob", "true")
+            // TCP keep-alive: evita que firewalls/NAT matem a ligacao parada sem o cliente saber
+            setProperty("oracle.net.keepAlive", "true")
         }
         val thread = Thread.currentThread()
         val old = thread.contextClassLoader

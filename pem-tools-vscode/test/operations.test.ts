@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { diagnoseBuild, withGlobalArg, GIT_COMMIT_ID_SKIP } from '../src/diagnose';
 import * as M from '../src/modules';
 import { Operations, deleteTargets, clearDir, findArtifact, parsePs, matchModuleJars, matchWebLogic, withDescendants, listProcesses } from '../src/operations';
 import { TaskRunner, ProgressEvent } from '../src/runner';
@@ -122,6 +123,21 @@ test('deploy de um módulo sem artefacto falha só esse passo e continua (resumo
   assert.equal(last.done, 2);
 });
 
+test('deploy BE+FE: só os módulos com artefacto, backend primeiro e depois frontend', async () => {
+  const ws = tmp(); const dom = tmp();
+  touch(path.join(ws, 'pem-fh-app/target/pem-fh-app-1.war'));
+  touch(path.join(ws, 'spms-plugins/portlets/header-portlet/target/header-portlet-1.war'));
+  const { ops, lines } = mk();
+  const p = { workspace: ws, domain: dom };
+  const { entries, skipped } = ops.deployableAll(p);
+  assert.deepEqual(entries.map((e) => e.name), ['pem-fh-app', 'header-portlet']);
+  assert.ok(skipped.includes('pem-dm-app') && !skipped.includes('pem-fh-app'));
+  await ops.deployAll(p, entries, skipped);
+  assert.ok(fs.existsSync(path.join(dom, 'servers/AdminServer/upload/pem-fh-app-1.war')));
+  assert.ok(fs.existsSync(path.join(dom, 'liferay/deploy/header-portlet-1.war')));
+  assert.ok(lines.some((l) => l.includes('ignorados') && l.includes('pem-dm-app')));
+});
+
 test('comando mvn: perfil, skip tests, localMock só no pem-common-domain, threads', () => {
   const { ops } = mk();
   const o = { profile: 'dev', skipTests: true, localMock: true, threads: '4' };
@@ -129,11 +145,16 @@ test('comando mvn: perfil, skip tests, localMock só no pem-common-domain, threa
   const domain = be.find((s) => s.label === 'pem-common-domain')!;
   const other = be.find((s) => s.label === 'pem-fh-domain')!;
   const report = be.find((s) => s.label === 'Test report backend')!;
-  assert.equal(ops.buildCommand(domain, o), 'mvn clean install -rf :pem-common-domain war:manifest war:war -Pdev,localMock -Dmaven.test.skip=true');
-  assert.equal(ops.buildCommand(other, o), 'mvn clean install -rf :pem-fh-domain war:manifest war:war -Pdev -Dmaven.test.skip=true');
+  assert.equal(ops.buildCommand(domain, o), 'mvn clean install -rf :pem-common-domain war:manifest war:war -Pdev,localMock,fast-build -DskipTests -DskipITs -Dmaven.test.skip=true');
+  assert.equal(ops.buildCommand(other, o), 'mvn clean install -rf :pem-fh-domain war:manifest war:war -Pdev,fast-build -DskipTests -DskipITs -Dmaven.test.skip=true');
   assert.equal(ops.buildCommand(report, o), 'mvn allure:aggregate');
   assert.equal(ops.buildCommand(domain, { ...o, profile: '', skipTests: false, localMock: false }), 'mvn clean install -rf :pem-common-domain war:manifest war:war');
-  assert.equal(ops.buildCommand(M.frontendBuild(true, '4')[1], o), 'mvn clean install -T 4 -Pdev -Dmaven.test.skip=true');
+  // sem perfil escolhido, «pular testes» ativa na mesma o fast-build; e não duplica se já estiver na lista
+  assert.equal(ops.buildCommand(domain, { ...o, profile: '', localMock: false }), 'mvn clean install -rf :pem-common-domain war:manifest war:war -Pfast-build -DskipTests -DskipITs -Dmaven.test.skip=true');
+  assert.equal(ops.buildCommand(domain, { ...o, profile: 'dev,fast-build', localMock: false }), 'mvn clean install -rf :pem-common-domain war:manifest war:war -Pdev,fast-build -DskipTests -DskipITs -Dmaven.test.skip=true');
+  // passos sem perfil (ex.: relatório allure) não levam nem perfil nem flags
+  assert.ok(!ops.buildCommand(M.backendBuild().find((b) => !b.withProfile)!, o).includes('fast-build'));
+  assert.equal(ops.buildCommand(M.frontendBuild(true, '4')[1], o), 'mvn clean install -T 4 -Pdev,fast-build -DskipTests -DskipITs -Dmaven.test.skip=true');
   assert.equal(M.frontendModuleBuild('pem-hook').dir, 'spms-plugins/hooks/pem-hook');
 });
 
@@ -235,4 +256,50 @@ test('kill WebLogic quando nada corre', async () => {
   const { ops, wl } = mk();
   await ops.killWebLogic({ workspace: '/x', domain: '/nao/existe/dominio-xyz' });
   assert.ok(wl.some((l) => l.includes('Nenhum processo WebLogic')));
+});
+
+test('parâmetros Maven extra: «*» para todos e por módulo, no fim do comando', () => {
+  const { ops } = mk();
+  const st = { label: 'pem-bkf-domain', dir: 'pem-bkf-domain', goals: 'clean install', withProfile: true };
+  const o = { profile: 'dev', skipTests: false, localMock: false, threads: '1C', mavenArgs: { '*': '-Dmaven.gitcommitid.skip=true', 'pem-bkf-domain': '-U\n-o' } };
+  assert.equal(ops.buildCommand(st, o), 'mvn clean install -Pdev -Dmaven.gitcommitid.skip=true -U -o');
+  assert.equal(ops.buildCommand({ ...st, label: 'outro' }, o), 'mvn clean install -Pdev -Dmaven.gitcommitid.skip=true');
+  assert.equal(ops.buildCommand(st, { ...o, mavenArgs: undefined }), 'mvn clean install -Pdev');
+});
+
+test('diagnóstico: Missing tree do git-commit-id-plugin é reconhecido; outros erros não', () => {
+  const out = '[ERROR] Failed to execute goal pl.project13.maven:git-commit-id-plugin:2.2.6:revision (git-info) on project pem-bkf-domain: Could not complete Mojo execution...: Missing tree e30276702beb7db51751a4b9a78f59c0acfeaa46 -> [Help 1]';
+  const d = diagnoseBuild(out)!;
+  assert.equal(d.id, 'git-commit-id-missing-object');
+  assert.equal(d.hash, 'e30276702beb7db51751a4b9a78f59c0acfeaa46');
+  assert.equal(diagnoseBuild('[ERROR] COMPILATION ERROR'), undefined);
+  assert.equal(diagnoseBuild('Missing tree abcdef1234 noutro sítio'), undefined);
+  assert.deepEqual(withGlobalArg({}, GIT_COMMIT_ID_SKIP), { '*': GIT_COMMIT_ID_SKIP });
+  assert.deepEqual(withGlobalArg({ '*': '-U', x: 'y' }, GIT_COMMIT_ID_SKIP), { '*': '-U ' + GIT_COMMIT_ID_SKIP, x: 'y' });
+  assert.deepEqual(withGlobalArg({ '*': GIT_COMMIT_ID_SKIP }, GIT_COMMIT_ID_SKIP), { '*': GIT_COMMIT_ID_SKIP });
+});
+
+test('reparar git: repack, remove o multi-pack-index e deixa o objeto legível (repositório de teste)', async () => {
+  const { execFileSync } = require('node:child_process');
+  const ws = tmp();
+  const g = (...a: string[]) => execFileSync('git', a, { cwd: ws, encoding: 'utf8' }).trim();
+  g('init', '-q'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't');
+  fs.writeFileSync(path.join(ws, 'a.txt'), 'x'); g('add', '.'); g('commit', '-qm', 'um');
+  const tree = g('rev-parse', 'HEAD^{tree}');
+  const { ops, lines } = mk();
+  await ops.repairGit({ workspace: ws, domain: ws }, tree);
+  assert.ok(lines.some((l) => l.includes('concluído com sucesso')), lines.join('\n'));
+  assert.equal(g('cat-file', '-t', tree), 'tree');
+});
+
+test('um passo que falha com Missing tree dispara o diagnóstico só depois de a tarefa acabar', async () => {
+  const dir = tmp();
+  const { ops } = mk();
+  const events: string[] = [];
+  ops.runner.onDiagnosis = (d) => events.push(`diag:${d.hash}:busy=${ops.runner.busy}`);
+  await ops.runner.run('t', 1, async (s) => {
+    await s.shell('mvn falso', dir, "echo '[ERROR] git-commit-id-plugin:2.2.6:revision: Missing tree abcdef1234567 -> [Help 1]'; exit 1");
+    events.push('passo-acabou');
+  });
+  assert.deepEqual(events, ['passo-acabou', 'diag:abcdef1234567:busy=false']);
 });

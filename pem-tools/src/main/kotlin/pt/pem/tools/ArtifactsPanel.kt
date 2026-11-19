@@ -124,3 +124,87 @@ class ArtifactsPanel(private val project: Project, private val runner: TaskRunne
         content.repaint()
     }
 }
+
+/**
+ * Pre-visualizacao do JSON/SOAP formatado, numa caixa que abre POR CIMA da janela onde esta o botao (funciona tambem com
+ * a consola desacoplada numa janela solta). Cores do tipo de ficheiro, so leitura; «Abrir no editor» abre um separador.
+ */
+class PayloadDialog(
+    parent: java.awt.Component,
+    private val project: Project?,
+    private val kind: String,
+    private val formatted: String,
+    private val openInEditor: () -> Unit,
+) : DialogWrapper(parent, true) {
+    init { title = if (kind == "json") "JSON" else "SOAP / XML"; init() }
+
+    /** blocos colapsaveis (regiao, true se tem indentacao: a raiz fica sempre aberta no «Recolher tudo») */
+    private val folds = ArrayList<Pair<com.intellij.openapi.editor.FoldRegion, Boolean>>()
+    private var foldEditor: com.intellij.openapi.editor.Editor? = null
+
+    private fun addFolds(ed: com.intellij.openapi.editor.ex.EditorEx) {
+        foldEditor = ed
+        val lines = formatted.split('\n')
+        val ends = PayloadFold.regions(lines)
+        val doc = ed.document
+        if (doc.lineCount != lines.size) return
+        ed.foldingModel.runBatchFoldingOperation {
+            for (i in lines.indices) {
+                val e = ends[i]
+                if (e < 0) continue
+                val from = doc.getLineEndOffset(i)
+                val to = doc.getLineEndOffset(e)
+                if (to <= from) continue
+                ed.foldingModel.addFoldRegion(from, to, " \u2026 " + PayloadFold.tail(lines, i, e))?.let {
+                    it.isExpanded = true
+                    folds += it to lines[i].startsWith(" ")
+                }
+            }
+        }
+    }
+
+    private fun setAllFolded(collapsed: Boolean) {
+        val ed = foldEditor ?: return
+        ed.foldingModel.runBatchFoldingOperation {
+            // do mais interior para o mais exterior nao interessa: so se muda o estado
+            folds.forEach { (r, nested) -> if (r.isValid) r.isExpanded = if (collapsed) !nested else true }
+        }
+    }
+
+    override fun createCenterPanel(): JComponent {
+        val ext = if (kind == "json") "json" else "xml"
+        val fileType = com.intellij.openapi.fileTypes.FileTypeManager.getInstance().getFileTypeByExtension(ext)
+        val body: JComponent = if (project != null) {
+            val doc = com.intellij.openapi.editor.EditorFactory.getInstance().createDocument(formatted)
+            com.intellij.ui.EditorTextField(doc, project, fileType, true, false).apply {
+                setOneLineMode(false)
+                addSettingsProvider { ed ->
+                    ed.settings.isLineNumbersShown = true
+                    ed.settings.isFoldingOutlineShown = true
+                    addFolds(ed)
+                    ed.setVerticalScrollbarVisible(true)
+                    ed.setHorizontalScrollbarVisible(true)
+                }
+            }
+        } else {
+            JBScrollPane(JBTextArea(formatted).apply { isEditable = false; font = Font(Font.MONOSPACED, Font.PLAIN, font.size); caretPosition = 0 })
+        }
+        return JPanel(BorderLayout()).apply { add(body, BorderLayout.CENTER); preferredSize = Dimension(JBUI.scale(1000), JBUI.scale(600)) }
+    }
+
+    override fun createActions(): Array<Action> {
+        val copy = object : AbstractAction("Copiar tudo") {
+            override fun actionPerformed(e: java.awt.event.ActionEvent?) = CopyPasteManager.getInstance().setContents(StringSelection(formatted))
+        }
+        val collapse = object : AbstractAction("Recolher tudo") {
+            override fun actionPerformed(e: java.awt.event.ActionEvent?) = setAllFolded(true)
+        }
+        val expand = object : AbstractAction("Expandir tudo") {
+            override fun actionPerformed(e: java.awt.event.ActionEvent?) = setAllFolded(false)
+        }
+        val editor = object : AbstractAction("Abrir no editor") {
+            override fun actionPerformed(e: java.awt.event.ActionEvent?) { close(OK_EXIT_CODE); openInEditor() }
+        }
+        return arrayOf(collapse, expand, copy, editor, okAction.also { it.putValue(Action.NAME, "Fechar") })
+    }
+}

@@ -43,6 +43,7 @@ class ConsoleLog : JScrollPane() {
 
 interface AppContext {
     fun openObject(handle: ConnectionHandle, ref: ObjectRef)
+    fun openJob(handle: ConnectionHandle, job: JobInfo)
     fun openConsole(handle: ConnectionHandle, text: String? = null)
     fun status(msg: String)
 }

@@ -168,7 +168,7 @@ class RpcServerTest {
         ok("session.close", mapOf("sessionId" to s))
     }
 
-    @Test fun `09 schema da sessao muda o CURRENT_SCHEMA`() {
+    @Test fun `07b schema da sessao muda o CURRENT_SCHEMA`() {
         val s = ok("session.open", mapOf("id" to connId, "schema" to "SYSTEM")).asJsonObject.get("sessionId").asString
         fun cur(): String {
             val runId = runScript(s, "select sys_context('USERENV','CURRENT_SCHEMA') from dual;")
@@ -178,6 +178,23 @@ class RpcServerTest {
         ok("session.schema", mapOf("sessionId" to s, "schema" to user.uppercase()))
         assertEquals(user.uppercase(), cur())
         ok("session.close", mapOf("sessionId" to s))
+    }
+
+    @Test fun `07c pesquisa de objetos com regex, maiusculas e palavra inteira`() {
+        fun names(vararg kv: Pair<String, Any>): List<String> =
+            ok("meta.search", mapOf("id" to connId, "preferOwner" to user.uppercase()) + kv).asJsonArray
+                .map { it.asJsonObject.getAsJsonObject("ref").get("name").asString }.filter { it.startsWith("SRV_") }.sorted()
+        assertEquals(listOf("SRV_T", "SRV_V"), names("text" to "srv_"))                                  // contem, sem maiusculas
+        assertEquals(listOf("SRV_T", "SRV_V"), names("text" to "SRV_[TV]", "regex" to true))
+        assertEquals(listOf("SRV_T"), names("text" to "\\w+_T\\b", "regex" to true))                          // \b traduzido para o Oracle
+        assertEquals(listOf("SRV_V"), names("text" to "^srv_v$", "regex" to true))
+        assertEquals(emptyList<String>(), names("text" to "^srv_v$", "regex" to true, "matchCase" to true))    // Aa: SRV_V != srv_v
+        assertEquals(listOf("SRV_V"), names("text" to "SRV_V", "regex" to true, "matchCase" to true))
+        assertEquals(listOf("SRV_T"), names("text" to "srv_t", "wholeWord" to true))                       // palavra inteira (sem regex)
+        assertEquals(emptyList<String>(), names("text" to "srv", "wholeWord" to true))
+        assertEquals(listOf("SRV_T", "SRV_V"), names("text" to "srv_*"))                                   // * curinga
+        val bad = runCatching { names("text" to "([", "regex" to true) }
+        assertTrue(bad.isFailure, "regex invalida da erro legivel")
     }
 
     @Test fun `06 instrucao sob o cursor, stop on error, commit e rollback`() {
@@ -214,6 +231,69 @@ class RpcServerTest {
         val err = events(runId).first { it.first == "run/error" }.second
         assertTrue(err.get("code").asInt == 1013 || err.get("message").asString.isNotBlank())
         ok("session.close", mapOf("sessionId" to s))
+    }
+
+    @Test fun `07d cancelar com forca corta a ligacao, termina a execucao e a consola fica livre`() {
+        val s = ok("session.open", mapOf("id" to connId)).asJsonObject.get("sessionId").asString
+        val runId = "force-run"
+        ok("session.run", mapOf("sessionId" to s, "runId" to runId, "sql" to "select count(*) from all_objects a, all_objects b, all_objects c, all_objects d", "mode" to "script"))
+        Thread.sleep(1500)
+        val t0 = System.currentTimeMillis()
+        ok("session.cancel", mapOf("sessionId" to s, "force" to true))
+        val done = waitNotification("run/done", runId)
+        assertTrue(System.currentTimeMillis() - t0 < 6000, "terminou depressa")
+        assertEquals(true, done.get("cancelled").asBoolean)
+        // a sessao antiga ja nao existe: o pedido seguinte falha de forma clara em vez de ficar preso
+        val gone = runCatching { ok("session.run", mapOf("sessionId" to s, "runId" to "x", "sql" to "select 1 from dual", "mode" to "script")) }
+        assertTrue(gone.isFailure || events("force-run").any { it.first == "run/done" })
+        // e uma sessao nova funciona logo
+        val s2 = ok("session.open", mapOf("id" to connId)).asJsonObject.get("sessionId").asString
+        val q = events(runScript(s2, "select 7 from dual;")).first { it.first == "run/query" }.second
+        assertEquals("7", q.getAsJsonArray("rows")[0].asJsonArray[0].asString)
+        ok("session.close", mapOf("sessionId" to s2))
+    }
+
+    @Test fun `07e lista os jobs do agendador e do DBMS_JOB, com o historico`() {
+        val s = ok("session.open", mapOf("id" to connId)).asJsonObject.get("sessionId").asString
+        val setup = runScript(s, "BEGIN DBMS_SCHEDULER.CREATE_JOB(job_name => 'SRV_JOB_TESTE', job_type => 'PLSQL_BLOCK', job_action => 'BEGIN NULL; END;', repeat_interval => 'FREQ=DAILY;BYHOUR=3;BYMINUTE=0', enabled => FALSE, comments => 'teste do servidor'); END;\n/\nDECLARE j BINARY_INTEGER; BEGIN DBMS_JOB.SUBMIT(j, 'BEGIN NULL; /*srvjob*/ END;', SYSDATE + 1, 'SYSDATE + 1'); COMMIT; END;\n/")
+        try {
+            assertTrue(events(setup).none { it.first == "run/error" }, "criar os jobs (precisa de CREATE JOB): ${events(setup).filter { it.first == "run/error" }.map { it.second.get("message") }}")
+            val jobs = ok("meta.jobs", mapOf("id" to connId)).asJsonArray.map { it.asJsonObject }
+            val sch = jobs.first { it.get("kind").asString == "scheduler" && it.get("name").asString == "SRV_JOB_TESTE" }
+            assertEquals(user.uppercase(), sch.get("owner").asString)
+            assertEquals(false, sch.get("enabled").asBoolean)
+            assertTrue(sch.get("schedule").asString.contains("BYHOUR=3"))
+            assertTrue(sch.get("action").asString.contains("BEGIN NULL"))
+            assertEquals("teste do servidor", sch.get("comments").asString)
+            val old = jobs.first { it.get("kind").asString == "dbms_job" && it.get("action").asString.contains("srvjob") }
+            assertEquals(user.uppercase(), old.get("owner").asString)
+            assertTrue(old.get("name").asString.startsWith("JOB "))
+            assertEquals("SYSDATE + 1", old.get("schedule").asString)
+            assertTrue(old.get("nextRun").asString.isNotBlank())
+            // historico (um job desligado nunca correu: lista vazia, mas o pedido tem de funcionar)
+            assertEquals(0, ok("meta.jobRuns", mapOf("id" to connId, "owner" to user.uppercase(), "name" to "SRV_JOB_TESTE")).asJsonArray.size())
+        } finally {
+            runScript(s, "BEGIN DBMS_SCHEDULER.DROP_JOB('SRV_JOB_TESTE', TRUE); EXCEPTION WHEN OTHERS THEN NULL; END;\n/\nBEGIN FOR r IN (SELECT job FROM user_jobs WHERE what LIKE '%srvjob%') LOOP DBMS_JOB.REMOVE(r.job); END LOOP; COMMIT; END;\n/")
+            ok("session.close", mapOf("sessionId" to s))
+        }
+    }
+
+    @Test fun `07f lista as FKs de outras tabelas que apontam para a tabela`() {
+        val s = ok("session.open", mapOf("id" to connId)).asJsonObject.get("sessionId").asString
+        val setup = runScript(s, "CREATE TABLE ZFK_PAI (ID NUMBER PRIMARY KEY, B NUMBER, CONSTRAINT ZFK_PAI_UQ UNIQUE (B));\nCREATE TABLE ZFK_FILHA (ID NUMBER, PAI_ID NUMBER, CONSTRAINT ZFK_FILHA_FK FOREIGN KEY (PAI_ID) REFERENCES ZFK_PAI (ID) ON DELETE CASCADE);")
+        try {
+            assertTrue(events(setup).none { it.first == "run/error" }, "criar tabelas: ${events(setup).filter { it.first == "run/error" }.map { it.second.get("message") }}")
+            val refs = ok("meta.referencedBy", mapOf("id" to connId, "ref" to mapOf("owner" to user.uppercase(), "name" to "ZFK_PAI", "type" to "TABLE"))).asJsonArray.map { it.asJsonObject }
+            assertEquals(1, refs.size)
+            assertEquals("ZFK_FILHA", refs[0].getAsJsonObject("table").get("name").asString)
+            assertEquals("ZFK_FILHA_FK", refs[0].get("name").asString)
+            assertEquals("PAI_ID", refs[0].get("columns").asString)
+            assertEquals("CASCADE", refs[0].get("deleteRule").asString)
+            assertEquals(0, ok("meta.referencedBy", mapOf("id" to connId, "ref" to mapOf("owner" to user.uppercase(), "name" to "ZFK_FILHA", "type" to "TABLE"))).asJsonArray.size())
+        } finally {
+            runScript(s, "DROP TABLE ZFK_FILHA PURGE;\nDROP TABLE ZFK_PAI PURGE;")
+            ok("session.close", mapOf("sessionId" to s))
+        }
     }
 
     @Test fun `08 limpeza e erro de metodo desconhecido`() {

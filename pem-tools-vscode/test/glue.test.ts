@@ -39,8 +39,11 @@ const fake = {
     getConfiguration: () => ({
       get: (k: string, d: unknown) => (settings.has(k) ? settings.get(k) : d),
       update: async (k: string, v: unknown) => { settings.set(k, v); },
+      inspect: () => undefined,
     }),
     onDidChangeConfiguration: () => ({ dispose() {} }),
+    registerTextDocumentContentProvider: () => ({ dispose() {} }),
+    onDidCloseTextDocument: () => ({ dispose() {} }),
   },
 };
 const origLoad = (Module as any)._load;
@@ -79,7 +82,7 @@ test('extensão: ativa, regista comandos/painel e o fluxo de deploy com botão t
   const logView: any = {
     show() {}, onDidDispose: () => ({ dispose() {} }),
     webview: {
-      options: undefined, html: '',
+      options: undefined, html: '', cspSource: 'vscode-resource:', asWebviewUri: (u: any) => u,
       onDidReceiveMessage: (cb: any) => { logHandler = cb; return { dispose() {} }; },
       postMessage: async (m: any) => {
         if (m.type === 'init') for (const [k, v] of Object.entries(m.data)) outputs.set(k, [...(v as string[])]);
@@ -91,9 +94,22 @@ test('extensão: ativa, regista comandos/painel e o fluxo de deploy com botão t
   logProvider.resolveWebviewView(logView);
   assert.match(logView.webview.html, /Content-Security-Policy/);
   assert.ok(logView.webview.html.includes('data-id="tasks"') && logView.webview.html.includes('data-id="wl"'), 'abas Tarefas e WebLogic');
+  // o JS do webview (numa template string) tem de ser sintaticamente válido
+  for (const m of logView.webview.html.matchAll(/<script nonce="[^"]*">([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new Function(m[1]), 'script do webview de logs');
+  assert.ok(logView.webview.html.includes('highlight.js'), 'carrega o motor de realce');
+  // o editor de regras abre numa caixa própria (painel), não dentro da vista estreita
+  assert.ok(!logView.webview.html.includes('id="ed"'), 'sem editor embutido na vista');
+  const { editorHtml } = await import('../src/rulesEditor');
+  const page = editorHtml({ asWebviewUri: (u: any) => u, cspSource: 'x' } as any, { fsPath: '/x' } as any);
+  for (const m of page.matchAll(/<script nonce="[^"]*">([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new Function(m[1]), 'script do editor de regras');
   logHandler!({ type: 'ready' });
+  // regras de realce e tamanho da fonte persistem nas definições do utilizador (settings.json), não no estado da extensão
+  logHandler!({ type: 'saveRules', rules: [{ enabled: true, name: 'SOAP', pattern: 'Envelope', mode: 'contains', wholeLine: true, background: '#123456' }] });
+  logHandler!({ type: 'saveFont', size: 16 });
+  assert.equal((settings.get('highlightRules') as any[])[0].name, 'SOAP');
+  assert.equal(settings.get('logFontSize'), 16);
   assert.match(view.webview.html, /Content-Security-Policy/);
-  for (const cmd of ['startWebLogic', 'stopWebLogic', 'killWebLogic', 'clearClasspath', 'cleanTargets', 'killJars', 'buildBackend', 'buildFrontend', 'buildFrontendFast', 'buildModules', 'deployBackend', 'deployFrontend', 'deployModules', 'cancel'])
+  for (const cmd of ['startWebLogic', 'stopWebLogic', 'killWebLogic', 'clearClasspath', 'cleanTargets', 'killJars', 'repairGit', 'buildBackend', 'buildFrontend', 'buildFrontendFast', 'buildAll', 'buildModules', 'deployBackend', 'deployFrontend', 'deployAll', 'deployModules', 'cancel'])
     assert.ok(view.webview.html.includes(`data-cmd="${cmd}"`), `botão ${cmd}`);
   await msgHandler!({ type: 'ready' });
   assert.equal(posted.at(-1).type, 'state');

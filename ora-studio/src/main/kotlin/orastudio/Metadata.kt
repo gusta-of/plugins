@@ -58,10 +58,23 @@ data class ConstraintInfo(
     val condition: String?,
 )
 
+/** FK de outra tabela que aponta para a tabela consultada. */
+data class FkRefInfo(val table: ObjectRef, val name: String, val columns: String, val refConstraint: String, val deleteRule: String?, val status: String)
+
 data class IndexInfo(val name: String, val type: String, val unique: Boolean, val columns: String, val status: String)
 data class TriggerInfo(val ref: ObjectRef, val event: String, val type: String, val status: String)
 data class DependencyInfo(val ref: ObjectRef)
 data class SearchHit(val ref: ObjectRef)
+
+/** Job agendado: `scheduler` (DBMS_SCHEDULER) ou `dbms_job` (DBMS_JOB, o antigo). Datas ja formatadas. */
+data class JobInfo(
+    val kind: String, val owner: String, val name: String, val enabled: Boolean, val state: String,
+    val schedule: String, val nextRun: String, val lastRun: String, val lastDuration: String,
+    val jobType: String, val action: String, val failures: Int, val comments: String,
+)
+
+/** Uma execucao passada de um job do DBMS_SCHEDULER. */
+data class JobRun(val startedAt: String, val status: String, val duration: String, val errorCode: Int, val info: String)
 
 class MetadataService(private val handle: ConnectionHandle) {
 
@@ -174,6 +187,22 @@ class MetadataService(private val handle: ConnectionHandle) {
                 }
             }
             ConstraintInfo(r.name, constraintLabel(r.type), cols[r.name]?.joinToString(", ").orEmpty(), r.status, refTable, refCols, r.del, r.cond)
+        }
+    }
+
+    /** FKs de outras tabelas que referenciam a PK/UNIQUE de [ref] (as tabelas "filhas"). */
+    fun referencedBy(ref: ObjectRef): List<FkRefInfo> = run { c ->
+        class Row(val owner: String, val table: String, val name: String, val col: String, val rName: String, val del: String?, val status: String)
+        val rows = c.query(
+            "SELECT c.owner, c.table_name, c.constraint_name, cc.column_name, c.r_constraint_name, c.delete_rule, c.status " +
+                "FROM all_constraints c JOIN all_constraints r ON r.owner = c.r_owner AND r.constraint_name = c.r_constraint_name " +
+                "JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name " +
+                "WHERE c.constraint_type = 'R' AND r.owner = ? AND r.table_name = ? " +
+                "ORDER BY c.owner, c.table_name, c.constraint_name, cc.position",
+            { it.setString(1, ref.owner); it.setString(2, ref.name) },
+        ) { Row(it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getString(5), it.getString(6), it.getString(7)) }
+        rows.groupBy { Triple(it.owner, it.table, it.name) }.map { (k, v) ->
+            FkRefInfo(ObjectRef(k.first, k.second, ObjectType.TABLE), k.third, v.joinToString(", ") { it.col }, v.first().rName, v.first().del, v.first().status)
         }
     }
 
@@ -391,17 +420,84 @@ class MetadataService(private val handle: ConnectionHandle) {
         return sb.toString().trimEnd()
     }
 
-    fun search(text: String, preferOwner: String?, limit: Int = 200): List<SearchHit> = run { c ->
-        val pattern = "%" + text.trim().uppercase().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    /** Tenta as vistas por ordem (DBA_ -> ALL_): sem privilegio de DBA ficam so os jobs que o utilizador consegue ver. */
+    private fun <T> firstAvailable(c: Connection, sqls: List<String>, setup: (PreparedStatement) -> Unit = {}, read: (java.sql.ResultSet) -> T): List<T> {
+        var last: java.sql.SQLException? = null
+        for (sql in sqls) {
+            try { return c.query(sql, setup, read) } catch (e: java.sql.SQLException) { last = e; if (e.errorCode != 942) throw e }
+        }
+        throw last ?: IllegalStateException("sem vistas de jobs")
+    }
+
+    /** Todos os jobs agendados visiveis: DBMS_SCHEDULER e DBMS_JOB (as vistas que nao existirem/forem inacessiveis sao saltadas). */
+    fun jobs(): List<JobInfo> = run { c ->
+        fun sched(view: String) = "SELECT owner, job_name, job_type, NVL(job_action, 'programa: ' || program_name), " +
+            "NVL(repeat_interval, 'agendamento: ' || schedule_name), enabled, state, " +
+            "TO_CHAR(next_run_date, 'YYYY-MM-DD HH24:MI:SS TZR'), TO_CHAR(last_start_date, 'YYYY-MM-DD HH24:MI:SS'), " +
+            "TO_CHAR(last_run_duration), NVL(failure_count, 0), comments FROM $view ORDER BY owner, job_name"
+        val scheduler = try {
+            firstAvailable(c, listOf(sched("dba_scheduler_jobs"), sched("all_scheduler_jobs"))) { rs ->
+                JobInfo("scheduler", rs.getString(1), rs.getString(2), rs.getString(6) == "TRUE", rs.getString(7) ?: "", rs.getString(5) ?: "",
+                    rs.getString(8) ?: "", rs.getString(9) ?: "", rs.getString(10)?.trim().orEmpty(), rs.getString(3) ?: "", rs.getString(4) ?: "", rs.getInt(11), rs.getString(12) ?: "")
+            }
+        } catch (_: java.sql.SQLException) { emptyList() }
+        fun legacy(view: String) = "SELECT schema_user, TO_CHAR(job), what, interval, broken, failures, " +
+            "TO_CHAR(next_date, 'YYYY-MM-DD HH24:MI:SS'), TO_CHAR(last_date, 'YYYY-MM-DD HH24:MI:SS') FROM $view ORDER BY schema_user, job"
+        val old = try {
+            firstAvailable(c, listOf(legacy("dba_jobs"), legacy("all_jobs"))) { rs ->
+                val broken = rs.getString(5) == "Y"
+                JobInfo("dbms_job", rs.getString(1), "JOB " + rs.getString(2), !broken, if (broken) "BROKEN" else "SCHEDULED", rs.getString(4) ?: "",
+                    rs.getString(7) ?: "", rs.getString(8) ?: "", "", "DBMS_JOB", rs.getString(3) ?: "", rs.getInt(6), "")
+            }
+        } catch (_: java.sql.SQLException) { emptyList() }
+        scheduler + old
+    }
+
+    /** Historico das ultimas execucoes de um job do DBMS_SCHEDULER (estado, duracao, erro). */
+    fun jobRuns(owner: String, name: String, limit: Int = 30): List<JobRun> = run { c ->
+        fun sql(view: String) = "SELECT * FROM (SELECT TO_CHAR(actual_start_date, 'YYYY-MM-DD HH24:MI:SS'), status, TO_CHAR(run_duration), error#, additional_info " +
+            "FROM $view WHERE owner = ? AND job_name = ? ORDER BY log_id DESC) WHERE ROWNUM <= $limit"
+        try {
+            firstAvailable(c, listOf(sql("dba_scheduler_job_run_details"), sql("all_scheduler_job_run_details")), { ps -> ps.setString(1, owner); ps.setString(2, name) }) { rs ->
+                JobRun(rs.getString(1) ?: "", rs.getString(2) ?: "", rs.getString(3)?.trim().orEmpty(), rs.getInt(4), rs.getString(5) ?: "")
+            }
+        } catch (_: java.sql.SQLException) { emptyList() }
+    }
+
+    /** Opcoes da pesquisa de objetos (como a pesquisa do VS Code): Aa, palavra inteira (ab) e expressao regular (.*). */
+    data class SearchOptions(val regex: Boolean = false, val matchCase: Boolean = false, val wholeWord: Boolean = false)
+
+    fun search(text: String, preferOwner: String?, limit: Int = 200, opts: SearchOptions = SearchOptions()): List<SearchHit> = run { c ->
+        val t = text.trim()
+        val (cond, bind) = searchCondition(t, opts)
         c.query(
             "SELECT * FROM (SELECT owner, object_name, object_type FROM all_objects " +
-                "WHERE object_name LIKE ? ESCAPE '\\' AND object_type IN ($TYPES_IN) AND object_name NOT LIKE 'BIN\$%' " +
+                "WHERE $cond AND object_type IN ($TYPES_IN) AND object_name NOT LIKE 'BIN\$%' " +
                 "ORDER BY CASE WHEN owner = ? THEN 0 ELSE 1 END, object_name, owner) WHERE ROWNUM <= $limit",
-            { it.setString(1, pattern); it.setString(2, preferOwner ?: "") },
+            { ps -> bind.forEachIndexed { i, v -> ps.setString(i + 1, v) }; ps.setString(bind.size + 1, preferOwner ?: "") },
         ) { rs -> ObjectType.of(rs.getString(3))?.let { SearchHit(ObjectRef(rs.getString(1), rs.getString(2), it)) } }.filterNotNull()
     }
 
     companion object {
+        /**
+         * Condicao SQL (com os valores a ligar) para filtrar `object_name`. Sem regex: texto com `*` como curinga
+         * (palavra inteira = sem os % das pontas); com regex: REGEXP_LIKE (o Oracle nao tem `\b`, e' traduzido).
+         */
+        fun searchCondition(text: String, o: SearchOptions): Pair<String, List<String>> {
+            if (o.regex) {
+                val body = oracleRegex(text)
+                val pattern = if (o.wholeWord) "^($body)$" else body
+                return "REGEXP_LIKE(object_name, ?, '${if (o.matchCase) "c" else "i"}')" to listOf(pattern)
+            }
+            val like = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace('*', '%')
+            val pattern = if (o.wholeWord) like else "%$like%"
+            return if (o.matchCase) "object_name LIKE ? ESCAPE '\\'" to listOf(pattern)
+            else "UPPER(object_name) LIKE UPPER(?) ESCAPE '\\'" to listOf(pattern)
+        }
+
+        /** O Oracle nao suporta `\b`: um nome de objeto e' uma so palavra, por isso a fronteira e' o inicio/fim ou um nao-identificador. */
+        fun oracleRegex(re: String): String = re.replace("\\b", "(^|$|[^[:alnum:]_$#])")
+
         const val FALLBACK_NOTE = "-- Gerado a partir do dicionario de dados (DBMS_METADATA indisponivel neste servidor/utilizador)."
         const val TYPES_IN = "'TABLE','VIEW','MATERIALIZED VIEW','SYNONYM','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','SEQUENCE','TYPE'"
 

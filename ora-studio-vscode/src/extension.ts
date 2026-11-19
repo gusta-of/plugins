@@ -2,15 +2,24 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ConnectionEditor } from './connectionEditor';
 import { showErrorBox } from './errorBox';
+import { JOB_SCHEME, JobDocProvider, jobUri } from './jobs';
 import { ConsoleManager } from './consoles';
 import { Core, errText } from './core';
 import { findJava } from './java';
 import { Bindings, DdlProvider, docUri, registerLanguageFeatures } from './language';
-import { ConnDto, ObjRef, isRelation, quotedRef } from './model';
+import { ConnDto, JobDto, ObjRef, isRelation, quotedRef } from './model';
 import { ResultsView } from './results';
 import { SidecarClient } from './rpc';
 import { StructureView } from './structure';
 import { ConnectionsTree, Node } from './tree';
+
+/** Mostra um indicador de progresso (barra na notificação) enquanto o conteúdo é pedido à base de dados. */
+function loading<T>(title: string, work: () => Thenable<T>): Thenable<T> {
+  return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title, cancellable: false }, () => work());
+}
+
+/** Opções da pesquisa «Ir para objeto» (lembradas até fechar o VS Code). */
+const searchOptions = { matchCase: false, wholeWord: false, regex: false };
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const log = vscode.window.createOutputChannel('Ora Studio');
@@ -38,12 +47,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   void core.refreshConfig().catch((e) => { log.appendLine(`Falha a ler a configuração: ${errText(e)}`); showError(e); });
 
   // ---- navegação / objetos ----
-  const openDdl = async (connId: string, ref: ObjRef, body = false) => {
+  const openDdl = (connId: string, ref: ObjRef, body = false) => loading(`A carregar ${ref.owner}.${ref.name}…`, async () => {
     const uri = docUri(connId, ref, body);
     const doc = await vscode.workspace.openTextDocument(uri);
     await vscode.languages.setTextDocumentLanguage(doc, 'oraclesql');
     await vscode.window.showTextDocument(doc, { preview: true });
-  };
+  });
 
   const openObject = async (connId: string, ref: ObjRef) => {
     // views, MVs e código abrem direto no DDL (o que as constrói); tabelas abrem a estrutura
@@ -73,23 +82,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (!connId || !(await core.ensureConnected(connId))) return;
     const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { ref: ObjRef }>();
     qp.title = `Ir para objeto — ${core.connName(connId)}`;
-    qp.placeholder = 'Escreva (mín. 2 letras) o nome do objeto';
+    qp.placeholder = 'Nome do objeto (mín. 2 letras); * é curinga. Ative .* para expressão regular';
     qp.matchOnDescription = true;
+    // opções como na pesquisa do VS Code: Aa (maiúsculas), ab (palavra inteira) e .* (regex); lembradas durante a sessão
+    const opts = searchOptions;
+    const buttons = () => ([
+      ['matchCase', 'case-sensitive', 'Maiúsculas/minúsculas (Aa)'],
+      ['wholeWord', 'whole-word', 'Palavra inteira (ab)'],
+      ['regex', 'regex', 'Expressão regular (.*) — sintaxe Oracle: \\w \\d \\s, [..], (a|b); \\b é traduzido'],
+    ] as const).map(([k, icon, tip]) => ({ iconPath: new vscode.ThemeIcon(icon, opts[k] ? new vscode.ThemeColor('charts.blue') : undefined), tooltip: `${tip}: ${opts[k] ? 'ativo' : 'desligado'}` }));
+    qp.buttons = buttons();
     let seq = 0;
     let timer: NodeJS.Timeout | undefined;
-    qp.onDidChangeValue((v) => {
+    const run = (v: string) => {
       if (timer) clearTimeout(timer);
       if (v.trim().length < 2) { qp.items = []; return; }
       timer = setTimeout(async () => {
         const my = ++seq;
         qp.busy = true;
         try {
-          const hits = await client.request<{ ref: ObjRef }[]>('meta.search', { id: connId, text: v.trim(), preferOwner: core.currentSchema.get(connId) });
+          const hits = await client.request<{ ref: ObjRef }[]>('meta.search', { id: connId, text: v.trim(), preferOwner: core.currentSchema.get(connId), ...opts });
           if (my !== seq) return;
-          qp.items = hits.map((h) => ({ label: h.ref.name, description: `${h.ref.owner} — ${h.ref.type}`, ref: h.ref }));
-        } catch (e) { qp.items = [{ label: errText(e).split('\n')[0], ref: undefined as unknown as ObjRef }]; }
+          // alwaysShow: o QuickPick filtra os itens pelo texto escrito; com regex/curingas o texto não aparece no nome
+          qp.items = hits.map((h) => ({ label: h.ref.name, description: `${h.ref.owner} — ${h.ref.type}`, ref: h.ref, alwaysShow: true }));
+        } catch (e) { qp.items = [{ label: errText(e).split('\n')[0], ref: undefined as unknown as ObjRef, alwaysShow: true }]; }
         qp.busy = false;
       }, 220);
+    };
+    qp.onDidChangeValue(run);
+    qp.onDidTriggerButton((b) => {
+      const i = qp.buttons.indexOf(b);
+      const key = (['matchCase', 'wholeWord', 'regex'] as const)[i];
+      if (key) { opts[key] = !opts[key]; qp.buttons = buttons(); run(qp.value); }
     });
     qp.onDidAccept(() => { const s = qp.selectedItems[0]; qp.hide(); if (s?.ref) void openObject(connId, s.ref); });
     qp.onDidHide(() => qp.dispose());
@@ -176,6 +200,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     cmd('oraStudio.selectConnection', async () => { const d = vscode.window.activeTextEditor?.document; if (d) await consoles.selectConnection(d); }),
 
     cmd('oraStudio.selectSchema', async () => { const d = vscode.window.activeTextEditor?.document; if (d) await consoles.selectSchema(d); }),
+    vscode.workspace.registerTextDocumentContentProvider(JOB_SCHEME, new JobDocProvider(core)),
+    cmd('oraStudio.openJob', (connId: string, job: JobDto) => loading(`A carregar o job ${job.owner}.${job.name}…`, async () => {
+      const doc = await vscode.workspace.openTextDocument(jobUri(connId, job));
+      await vscode.languages.setTextDocumentLanguage(doc, 'oraclesql');
+      await vscode.window.showTextDocument(doc, { preview: true });
+    })),
+    cmd('oraStudio.filterJobs', async (n?: Node) => {
+      const connId = n && 'connId' in n ? n.connId : undefined;
+      if (!connId) return;
+      const v = await vscode.window.showInputBox({
+        title: 'Filtrar jobs por nome', value: tree.jobFilter(connId), ignoreFocusOut: true,
+        prompt: 'Texto (sem maiúsculas), * como curinga ou /regex/. Vazio = mostrar todos.',
+        placeHolder: 'ex.: limpa   |   limpa*logs   |   /_(bkp|log)$/',
+      });
+      if (v !== undefined) tree.setJobFilter(connId, v);
+    }),
+    cmd('oraStudio.clearJobFilter', (n?: Node) => { if (n && 'connId' in n) tree.setJobFilter(n.connId, ''); }),
     cmd('oraStudio.goToObject', goToObject),
     cmd('oraStudio.openObject', (connId: string, ref: ObjRef) => openObject(connId, ref)),
     cmd('oraStudio.openDdl', async (a: string | Node, ref?: ObjRef) => {

@@ -6,6 +6,8 @@ import * as vscode from 'vscode';
 import * as M from './modules';
 import { Operations, BuildOptions, Paths } from './operations';
 import { LogKind, TaskRunner } from './runner';
+import { Diagnosis, GIT_COMMIT_ID_SKIP, withGlobalArg } from './diagnose';
+import { openMavenParams } from './mavenParams';
 import { PanelProvider, PanelState, Settings } from './panel';
 
 const SECTION = 'pemWlTools';
@@ -26,10 +28,17 @@ function readSettings(): Settings {
   };
 }
 
+function readMavenArgs(): M.MavenArgs {
+  const raw = cfg().get<Record<string, unknown>>('mavenArgs', {});
+  const out: M.MavenArgs = {};
+  for (const [k, v] of Object.entries(raw ?? {})) { const a = M.cleanArg(v); if (a) out[k] = a; }
+  return out;
+}
+
 const prefix: Record<LogKind, string> = { info: '', ok: '✔ ', err: '✘ ', sys: '', warn: '⚠ ' };
 
 export function activate(context: vscode.ExtensionContext): void {
-  const hub = new LogHub([{ id: 'tasks', label: 'Tarefas' }, { id: 'wl', label: 'WebLogic' }]);
+  const hub = new LogHub([{ id: 'tasks', label: 'Tarefas' }, { id: 'wl', label: 'WebLogic' }], context.extensionUri, context.globalState);
   const tasksOut = hub.channel('tasks');
   const wlOut = hub.channel('wl');
   const logTo = (ch: LogChannel) => (text: string, kind: LogKind = 'info') => ch.appendLine(prefix[kind] + text);
@@ -94,7 +103,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   const buildOptions = (): BuildOptions => {
     const s = readSettings();
-    return { profile: s.mavenProfile, skipTests: s.skipTests, localMock: s.localMock, threads: s.threads };
+    return { profile: s.mavenProfile, skipTests: s.skipTests, localMock: s.localMock, threads: s.threads, mavenArgs: readMavenArgs() };
   };
 
   /** Regista um comando de tarefa: abre o canal certo, trava o botão e destrava quando acabar. */
@@ -138,10 +147,38 @@ export function activate(context: vscode.ExtensionContext): void {
   task('cleanTargets', runner, tasksOut, taskKeys, () => { const p = workspaceOnly(); return p && ops.cleanTargets(p); });
   task('killJars', runner, tasksOut, taskKeys, () => ops.killModuleJars());
 
+  // ---- git / falhas conhecidas ----
+  const repairGitFlow = async (hash?: string): Promise<void> => {
+    const p = workspaceOnly();
+    if (!p) return;
+    const ok = await vscode.window.showWarningMessage(
+      `Vai correr «git repack -a -d», remover o multi-pack-index e «git prune-packed» em:\n${p.workspace}\n\nNão apaga histórico; em repositórios grandes pode demorar alguns minutos.`,
+      { modal: true }, 'Reparar');
+    if (!ok) return;
+    tasksOut.show(true);
+    const t = ops.repairGit(p, hash);
+    locked.add('repairGit'); taskKeys.add('repairGit'); panel.pushState();
+    await t;
+  };
+  context.subscriptions.push(vscode.commands.registerCommand('pemWlTools.repairGit', () => repairGitFlow()));
+  runner.onDiagnosis = (d: Diagnosis) => {
+    const fix = 'Reparar repositório git', skip = 'Ignorar o git-commit-id';
+    void vscode.window.showWarningMessage(`${d.summary}\n\nO que fazer?`, fix, skip).then(async (c) => {
+      if (c === fix) await repairGitFlow(d.hash);
+      else if (c === skip) {
+        await cfg().update('mavenArgs', withGlobalArg(readMavenArgs(), GIT_COMMIT_ID_SKIP), vscode.ConfigurationTarget.Global);
+        void vscode.window.showInformationMessage(`Acrescentei ${GIT_COMMIT_ID_SKIP} aos parâmetros Maven de todos os módulos (botão de engrenagem da secção Build). Corre o build outra vez.`);
+      }
+    });
+  };
+
   // ---- build ----
+  context.subscriptions.push(vscode.commands.registerCommand('pemWlTools.mavenParams', () =>
+    openMavenParams(context.extensionUri, readMavenArgs, (a) => cfg().update('mavenArgs', a, vscode.ConfigurationTarget.Global))));
   task('buildBackend', runner, tasksOut, taskKeys, () => { const p = workspaceOnly(); return p && ops.buildBackend(p, buildOptions()); });
   task('buildFrontend', runner, tasksOut, taskKeys, () => { const p = workspaceOnly(); return p && ops.buildFrontend(p, buildOptions(), false); });
   task('buildFrontendFast', runner, tasksOut, taskKeys, () => { const p = workspaceOnly(); return p && ops.buildFrontend(p, buildOptions(), true); });
+  task('buildAll', runner, tasksOut, taskKeys, () => { const p = workspaceOnly(); return p && ops.buildAll(p, buildOptions()); });
   task('buildModules', runner, tasksOut, taskKeys, () => {
     const p = workspaceOnly();
     if (!p) return undefined;
@@ -166,6 +203,19 @@ export function activate(context: vscode.ExtensionContext): void {
     return (async () => {
       const sel = await pickModules('Deploy Frontend — escolhe os módulos', Object.keys(M.frontendDeploy).map((name): M.ModuleEntry => ({ name, kind: 'frontend' })));
       if (sel) { tasksOut.show(true); const t = ops.deployFrontend(p, sel.map((s) => s.name)); locked.add('deployFrontend'); taskKeys.add('deployFrontend'); panel.pushState(); await t; }
+    })();
+  });
+  task('deployAll', runner, tasksOut, taskKeys, () => {
+    const p = paths();
+    if (!p) return undefined;
+    return (async () => {
+      const { entries, skipped } = ops.deployableAll(p);
+      if (!entries.length) { void vscode.window.showWarningMessage('Nenhum módulo com artefacto em target/: corre o build primeiro.'); return; }
+      const nb = entries.filter((e) => e.kind === 'backend').length;
+      const ok = await vscode.window.showWarningMessage(
+        `Deploy de ${entries.length} módulos (${nb} backend + ${entries.length - nb} frontend)` + (skipped.length ? `\n${skipped.length} sem artefacto serão ignorados.` : ''),
+        { modal: true }, 'Fazer deploy');
+      if (ok) { tasksOut.show(true); const t = ops.deployAll(p, entries, skipped); locked.add('deployAll'); taskKeys.add('deployAll'); panel.pushState(); await t; }
     })();
   });
   task('deployModules', runner, tasksOut, taskKeys, () => {

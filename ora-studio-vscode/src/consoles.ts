@@ -9,6 +9,8 @@ interface ConsoleState {
   sessionId?: string;
   autoCommit: boolean;
   runId?: string;
+  /** já pediu cancelar esta execução (um segundo clique força o corte da ligação) */
+  cancelling?: boolean;
   /** deslocamento: posição de cada instrução enviada (para marcar erros) */
   base: number;
 }
@@ -244,6 +246,16 @@ export class ConsoleManager implements vscode.CodeLensProvider {
 
   private onNotification(method: string, p: any): void {
     if (!method.startsWith('run/')) return;
+    if (method === 'run/done') {
+      const uri = this.runDocs.get(p.runId);
+      const st = uri && this.states.get(uri.toString());
+      if (st) {
+        st.cancelling = false;
+        // a ligação foi cortada para cancelar: a sessão deixou de existir, a próxima execução abre outra
+        if (p.sessionLost) st.sessionId = undefined;
+      }
+      this.updateStatus(vscode.window.activeTextEditor);
+    }
     this.results.onRunEvent(method, p);
     if (method === 'run/error') this.markError(p);
   }
@@ -284,9 +296,14 @@ export class ConsoleManager implements vscode.CodeLensProvider {
     return doc && st?.sessionId ? { doc, st } : undefined;
   }
 
+  /** 1.º clique: pede ao Oracle para interromper; 2.º clique (ou sem resposta em ~2,5 s): corta a ligação e liberta a consola. */
   async cancel(): Promise<void> {
     const c = this.current();
-    if (c) await this.core.client.request('session.cancel', { sessionId: c.st.sessionId });
+    if (!c) return;
+    const force = !!c.st.cancelling;
+    c.st.cancelling = true;
+    vscode.window.setStatusBarMessage(force ? '$(debug-stop) A forçar o corte da ligação…' : '$(debug-stop) A cancelar… (clique outra vez para forçar já)', 4000);
+    await this.core.client.request('session.cancel', { sessionId: c.st.sessionId, force });
   }
 
   async commit(): Promise<void> { await this.tx('session.commit', 'Commit concluído'); }

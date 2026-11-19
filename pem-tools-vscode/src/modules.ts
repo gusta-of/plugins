@@ -1,3 +1,5 @@
+import { pomDependencies, sortByDependencies } from './buildOrder';
+
 /** Listas de módulos do PEM (iguais às dos scripts .vscode/scripts e ao plugin do IntelliJ). */
 
 export interface BuildStep {
@@ -31,6 +33,27 @@ export function backendBuild(): BuildStep[] {
   add('pem-bkf-app', 'pem-bkf-app', 'clean install -rf :pem-bkf-app war:war');
   add('Test report backend', 'pem', 'allure:aggregate', false);
   return out;
+}
+
+/**
+ * Passos do backend com os módulos ordenados pelas dependências dos pom.xml de [workspace]
+ * (a ordem fixa de build-backend.sh estava errada, p.ex. para pem-common-app / spms-plugins-common).
+ * Os dois primeiros passos (pem-common-beans e o reactor «pem») e o relatório final ficam nas pontas.
+ */
+export function backendBuildOrdered(workspace: string, onCycle: (rest: string[]) => void = () => {}): BuildStep[] {
+  const fixed = backendBuild();
+  const head = fixed.slice(0, 2);
+  const tail = fixed.filter((s) => !s.withProfile);
+  const middle = fixed.slice(2).filter((s) => s.withProfile);
+  const order = sortByDependencies(middle.map((s) => s.dir), pomDependencies(workspace, middle.map((s) => s.dir)), onCycle);
+  return [...head, ...order.map((d) => middle.find((s) => s.dir === d)!), ...tail];
+}
+
+/** Ordena a seleção do utilizador: backend pelas dependências, depois o frontend (ordem recebida). */
+export function orderEntries(workspace: string, entries: ModuleEntry[]): ModuleEntry[] {
+  const labels = backendBuildOrdered(workspace).map((s) => s.label);
+  const rank = (e: ModuleEntry) => { const i = labels.indexOf(e.name); return i < 0 ? Number.MAX_SAFE_INTEGER : i; };
+  return [...entries.filter((e) => e.kind === 'backend').sort((a, b) => rank(a) - rank(b)), ...entries.filter((e) => e.kind !== 'backend')];
 }
 
 export function frontendBuild(fast: boolean, threads = '1C'): BuildStep[] {
@@ -98,4 +121,33 @@ export const threadOptions = ['1C', '0.5C', '2C', '1', '2', '4', '6', '8', '12',
 export function sanitizeThreads(raw: string): string {
   const t = (raw ?? '').trim();
   return /^\d+(\.\d+)?C?$/.test(t) ? t : '1C';
+}
+
+/** Chave dos parâmetros Maven que valem para todos os builds. */
+export const ALL_MODULES = '*';
+
+export type MavenArgs = Record<string, string>;
+
+/** Limpa o que o utilizador escreveu: uma só linha, sem espaços nas pontas. */
+export function cleanArg(s: unknown): string {
+  return String(s ?? '').replace(/[\r\n]+/g, ' ').trim();
+}
+
+/** Parâmetros extra do `mvn` para um passo: os de «todos» e a seguir os do módulo. */
+export function mavenArgsFor(label: string, args: MavenArgs | undefined): string {
+  if (!args) return '';
+  return [cleanArg(args[ALL_MODULES]), cleanArg(args[label])].filter(Boolean).join(' ');
+}
+
+export interface PomModule { name: string; dir: string; kind: Kind }
+
+/** Módulos com pom.xml que têm build (backend e frontend), sem repetições, para o ecrã de parâmetros Maven. */
+export function buildPomModules(): PomModule[] {
+  const seen = new Set<string>();
+  const out: PomModule[] = [];
+  const add = (name: string, dir: string, kind: Kind) => { if (!seen.has(name)) { seen.add(name); out.push({ name, dir, kind }); } };
+  backendBuild().forEach((s) => add(s.label, s.dir, 'backend'));
+  frontendBuild(false).forEach((s) => add(s.label, s.dir, 'frontend'));
+  Object.keys(frontendDeploy).forEach((n) => add(n, `spms-plugins/${frontendDeploy[n]}/${n}`, 'frontend'));
+  return out;
 }

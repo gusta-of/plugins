@@ -61,7 +61,10 @@ export class StructureView {
     const c = this.core.client;
     switch (tab) {
       case 'Colunas': return c.request('meta.columns', { id, ref });
-      case 'Constraints': return c.request('meta.constraints', { id, ref });
+      case 'Constraints': {
+        const [own, refs] = await Promise.all([c.request('meta.constraints', { id, ref }), c.request('meta.referencedBy', { id, ref })]);
+        return { own, refs };
+      }
       case 'Índices': return c.request('meta.indexes', { id, ref });
       case 'Triggers': return c.request('meta.triggers', { id, ref });
       case 'Dados': return c.request('table.data', { id, ref, where: m.where ?? '', limit: m.limit ?? 500 });
@@ -100,7 +103,8 @@ export class StructureView {
   function render(tab, d) {
     const c = $('content');
     if (tab === 'Colunas') c.innerHTML = table(['#', 'Coluna', 'Tipo', 'Nulo?', 'Default', 'Comentário'], d.map((x) => [x.id, esc(x.name), esc(x.type), x.nullable ? 'SIM' : 'NÃO', esc(x.default), esc(x.comment)]));
-    else if (tab === 'Constraints') c.innerHTML = table(['Nome', 'Tipo', 'Colunas', 'Referência', 'Colunas ref.', 'On delete', 'Condição', 'Estado'], d.map((x) => [esc(x.name), esc(x.type), esc(x.columns), x.refTable ? link(x.refTable) : '', esc(x.refColumns), esc(x.deleteRule), esc(x.condition), esc(x.status)]));
+    else if (tab === 'Constraints') c.innerHTML = '<h3>Constraints (' + d.own.length + ')</h3>' + table(['Nome', 'Tipo', 'Colunas', 'Referência', 'Colunas ref.', 'On delete', 'Condição', 'Estado'], d.own.map((x) => [esc(x.name), esc(x.type), esc(x.columns), x.refTable ? link(x.refTable) : '', esc(x.refColumns), esc(x.deleteRule), esc(x.condition), esc(x.status)]))
+      + '<h3>Referenciada por — FKs de outras tabelas (' + d.refs.length + ')</h3>' + table(['Tabela', 'FK', 'Colunas', 'Referência', 'On delete', 'Estado'], d.refs.map((x) => [link(x.table), esc(x.name), esc(x.columns), esc(x.refConstraint), esc(x.deleteRule), esc(x.status)]));
     else if (tab === 'Índices') c.innerHTML = table(['Nome', 'Tipo', 'Único', 'Colunas', 'Estado'], d.map((x) => [esc(x.name), esc(x.type), x.unique ? 'SIM' : 'NÃO', esc(x.columns), esc(x.status)]));
     else if (tab === 'Triggers') c.innerHTML = table(['Trigger', 'Evento', 'Tipo', 'Estado'], d.map((x) => [link(x.ref), esc(x.event), esc(x.type), esc(x.status)]));
     else if (tab === 'Dependências') c.innerHTML = '<h3>Usa (' + d.uses.length + ')</h3>' + table(['Objeto', 'Tipo'], d.uses.map((x) => [link(x.ref), esc(x.ref.type)])) + '<h3>Usado por (' + d.usedBy.length + ')</h3>' + table(['Objeto', 'Tipo'], d.usedBy.map((x) => [link(x.ref), esc(x.ref.type)]));

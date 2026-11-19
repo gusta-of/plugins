@@ -45,7 +45,8 @@ export class ResultsView implements vscode.WebviewViewProvider {
       case 'run/update': this.post({ type: 'update', ...p }); break;
       case 'run/error': this.post({ type: 'error', ...p }); break;
       case 'run/output': this.post({ type: 'output', lines: p.lines }); break;
-      case 'run/done': this.post({ type: 'done', cancelled: p.cancelled }); break;
+      case 'run/cancelling': this.post({ type: 'cancelling', force: p.force }); break;
+      case 'run/done': this.post({ type: 'done', cancelled: p.cancelled, forced: p.forced }); break;
     }
   }
 
@@ -143,7 +144,8 @@ export class ResultsView implements vscode.WebviewViewProvider {
       case 'update': log('✔ ' + (m.text || '').trim().split(/\\r?\\n/)[0].slice(0, 90) + '  → ' + m.message + ' (' + m.elapsedMs + ' ms)', 'ok'); (m.notes || []).forEach((n) => log('   ' + n, 'warn')); break;
       case 'error': log('✘ ' + (m.text || '').trim().split(/\\r?\\n/)[0].slice(0, 90), 'err', { start: m.position >= 0 ? m.position : m.start, end: m.position >= 0 ? m.position + 1 : m.end }); log('   ' + m.message, 'err'); active = 'log'; renderTabs(); renderPane(); break;
       case 'output': log('— DBMS_OUTPUT —', 'dim'); m.lines.forEach((l) => log(l, 'dim')); break;
-      case 'done': $('title').textContent = (m.cancelled ? '■ Cancelado' : 'Concluído') + ' — ' + results.length + ' resultado(s)'; log(m.cancelled ? '■ Cancelado.' : 'Concluído.', m.cancelled ? 'warn' : 'ok'); break;
+      case 'cancelling': log(m.force ? '■ A cortar a ligação…' : '■ A cancelar… (se o Oracle não responder em ~2,5 s a ligação é cortada; clicar de novo força já)', 'warn'); $('title').textContent = 'A cancelar…'; break;
+      case 'done': if (m.forced) log('A ligação foi cortada para cancelar a consulta. A transação desta consola foi perdida; a próxima execução abre uma sessão nova.', 'warn'); $('title').textContent = (m.cancelled ? '■ Cancelado' : 'Concluído') + ' — ' + results.length + ' resultado(s)'; log(m.cancelled ? '■ Cancelado.' : 'Concluído.', m.cancelled ? 'warn' : 'ok'); break;
       case 'rows': { const r = results.find((x) => x.cursorId === m.cursorId); if (r) { r.rows = r.rows.concat(m.rows); r.hasMore = m.hasMore; if (active === r.id) renderPane(); } break; }
       case 'moreError': log('Carregar mais: ' + m.message, 'err'); break;
     }

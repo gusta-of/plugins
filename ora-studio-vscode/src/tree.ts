@@ -1,13 +1,16 @@
 import * as vscode from 'vscode';
 import { fullErrorText } from './errorBox';
+import { jobMatcher } from './jobFilter';
 import { Core, errText } from './core';
-import { BROWSABLE_TYPES, ConnDto, ObjRef, TYPE_ICON, TYPE_LABEL, TYPE_PLURAL, isRelation } from './model';
+import { BROWSABLE_TYPES, ConnDto, JobDto, ObjRef, TYPE_ICON, TYPE_LABEL, TYPE_PLURAL, isRelation } from './model';
 
 export type Node =
   | { kind: 'conn'; conn: ConnDto }
   | { kind: 'schema'; connId: string; name: string; current: boolean }
   | { kind: 'category'; connId: string; owner: string; type: string }
   | { kind: 'object'; connId: string; ref: ObjRef; valid: boolean }
+  | { kind: 'jobs'; connId: string }
+  | { kind: 'job'; connId: string; job: JobDto }
   | { kind: 'message'; text: string; error?: boolean; detail?: string };
 
 /** Árvore: Ligação › Schema › Categoria (Tabelas, Views, ...) › Objeto, com carregamento ao expandir. */
@@ -16,6 +19,16 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
   readonly onDidChangeTreeData = this._onDidChange.event;
   /** erros de ligação a mostrar como filho do nó (por ligação) */
   private readonly errors = new Map<string, string>();
+  /** filtro de jobs por ligação (texto, * curinga ou /regex/) */
+  private readonly jobFilters = new Map<string, string>();
+
+  jobFilter(connId: string): string { return this.jobFilters.get(connId) ?? ''; }
+
+  setJobFilter(connId: string, text: string): void {
+    if (text.trim()) this.jobFilters.set(connId, text.trim()); else this.jobFilters.delete(connId);
+    void vscode.commands.executeCommand('setContext', 'oraStudio.hasJobFilter', this.jobFilters.size > 0);
+    this.refresh();
+  }
 
   constructor(private readonly core: Core) {
     core.onConnectionsChanged(() => this.refresh());
@@ -48,6 +61,33 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
         it.iconPath = new vscode.ThemeIcon('symbol-namespace', n.current ? new vscode.ThemeColor('testing.iconPassed') : undefined);
         it.contextValue = 'schema';
         if (n.current) it.description = 'atual';
+        return it;
+      }
+      case 'jobs': {
+        const it = new vscode.TreeItem('Jobs agendados', vscode.TreeItemCollapsibleState.Collapsed);
+        it.id = `jobs:${n.connId}`;
+        it.iconPath = new vscode.ThemeIcon('clock');
+        const f = this.jobFilter(n.connId);
+        it.contextValue = f ? 'jobsFiltered' : 'jobs';
+        it.description = f ? `filtro: ${f}` : undefined;
+        it.tooltip = 'Jobs do DBMS_SCHEDULER e do DBMS_JOB (os «crons» da base de dados). Ícone de filtro: filtrar por nome';
+        return it;
+      }
+      case 'job': {
+        const j = n.job;
+        const bad = j.failures > 0 || /FAIL|BROKEN/i.test(j.state);
+        const it = new vscode.TreeItem(`${j.owner}.${j.name}`, vscode.TreeItemCollapsibleState.None);
+        it.id = `job:${n.connId}:${j.kind}:${j.owner}.${j.name}`;
+        it.iconPath = bad ? new vscode.ThemeIcon('error', new vscode.ThemeColor('errorForeground'))
+          : j.enabled ? new vscode.ThemeIcon('watch', new vscode.ThemeColor('testing.iconPassed')) : new vscode.ThemeIcon('circle-slash');
+        it.description = `${j.enabled ? 'ativo' : 'desligado'} · ${shortSchedule(j)} · próx. ${j.nextRun ? j.nextRun.slice(0, 16) : '—'}`;
+        it.contextValue = 'job';
+        const md = new vscode.MarkdownString();
+        md.appendMarkdown(`**${j.owner}.${j.name}** (${j.kind === 'scheduler' ? 'DBMS_SCHEDULER' : 'DBMS_JOB'})\n\n`);
+        md.appendMarkdown(`- Estado: ${j.state}${j.failures ? ` — falhas: ${j.failures}` : ''}\n- Agenda: \`${j.schedule}\`\n- Próxima: ${j.nextRun || '—'}\n- Última: ${j.lastRun || '—'}${j.lastDuration ? ` (${j.lastDuration})` : ''}\n`);
+        if (j.comments) md.appendMarkdown(`- ${j.comments}\n`);
+        it.tooltip = md;
+        it.command = { command: 'oraStudio.openJob', title: 'Abrir job', arguments: [n.connId, j] };
         return it;
       }
       case 'category': {
@@ -93,8 +133,17 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
           void prev;
           const schemas = await this.core.client.request<string[]>('meta.schemas', { id: n.conn.id });
           const cur = this.core.currentSchema.get(n.conn.id);
-          return [...schemas].sort((a, b) => Number(b === cur) - Number(a === cur) || a.localeCompare(b))
-            .map((name): Node => ({ kind: 'schema', connId: n.conn.id, name, current: name === cur }));
+          return [{ kind: 'jobs', connId: n.conn.id } as Node, ...[...schemas].sort((a, b) => Number(b === cur) - Number(a === cur) || a.localeCompare(b))
+            .map((name): Node => ({ kind: 'schema', connId: n.conn.id, name, current: name === cur }))];
+        }
+        case 'jobs': {
+          const jobs = await this.core.client.request<JobDto[]>('meta.jobs', { id: n.connId });
+          this.core.jobs.set(n.connId, jobs);
+          if (jobs.length === 0) return [{ kind: 'message', text: '(sem jobs visíveis para este utilizador)' }];
+          const f = this.jobFilter(n.connId);
+          const shown = jobs.filter(jobMatcher(f));
+          if (shown.length === 0) return [{ kind: 'message', text: `(nenhum job com «${f}»)` }];
+          return shown.map((job): Node => ({ kind: 'job', connId: n.connId, job }));
         }
         case 'schema':
           return BROWSABLE_TYPES.map((type): Node => ({ kind: 'category', connId: n.connId, owner: n.name, type }));
@@ -114,4 +163,11 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
       return [{ kind: 'message', text: errText(e).split('\n')[0] + '  (clique para ver tudo)', error: true, detail: fullErrorText(e) }];
     }
   }
+}
+
+/** Agenda resumida para a descrição do nó: FREQ=DAILY;BYHOUR=3 -> "DAILY BYHOUR=3"; DBMS_JOB: o próprio intervalo. */
+function shortSchedule(j: JobDto): string {
+  const s = j.schedule.trim();
+  if (!s) return 'sem agenda';
+  return s.replace(/FREQ=/i, '').replace(/;/g, ' ').slice(0, 40);
 }

@@ -26,6 +26,9 @@ class Operations(private val runner: TaskRunner, private val wlRunner: TaskRunne
     /** Lido a cada build: acrescenta o perfil localMock, apenas ao modulo pem-common-domain. */
     var localMock: () -> Boolean = { false }
 
+    /** Lido a cada build: parametros extra do mvn (`*` = todos, ou o nome do modulo). */
+    var mavenArgs: () -> Map<String, String> = { emptyMap() }
+
     @Volatile private var wlHandler: OSProcessHandler? = null
 
     val weblogicRunning: Boolean get() = wlHandler?.isProcessTerminated == false
@@ -94,9 +97,42 @@ class Operations(private val runner: TaskRunner, private val wlRunner: TaskRunne
         }
     }
 
+    // ---- git ----
+
+    /**
+     * Volta a empacotar o repositorio do workspace em packs `pack-*` normais (que o JGit do git-commit-id-plugin le)
+     * e remove o multi-pack-index. Nao apaga historico: so junta os objetos e tira os packs redundantes.
+     */
+    fun repairGit(p: Paths, hash: String? = null) {
+        val verify = hash?.takeIf { Regex("^[0-9a-f]{7,40}$").matches(it) }
+        runner.run("Reparar repositorio git (repack)", if (verify != null) 4 else 3) {
+            shell("git repack -a -d", p.workspace, "git repack -a -d")
+            step("Remover multi-pack-index") {
+                val rel = gitOut(p.workspace, "rev-parse", "--git-path", "objects/pack/multi-pack-index")
+                val f = p.workspace.resolve(rel).normalize()
+                Files.deleteIfExists(f)
+                runner.log("Removido (se existia): $f")
+            }
+            shell("git prune-packed", p.workspace, "git prune-packed")
+            if (verify != null) shell("Verificar o objeto ${verify.take(10)}", p.workspace, "git cat-file -t $verify")
+            runner.log("Se o git maintenance voltar a criar packs «loose-*», repete esta operacao (ou usa «Parametros Maven» com ${BuildDiagnosis.GIT_COMMIT_ID_SKIP}).")
+        }
+    }
+
+    private fun gitOut(cwd: Path, vararg args: String): String {
+        val pr = ProcessBuilder(listOf("git") + args).directory(cwd.toFile()).redirectErrorStream(true).start()
+        val out = pr.inputStream.bufferedReader().readText().trim()
+        check(pr.waitFor() == 0) { "git ${args.joinToString(" ")}: $out" }
+        return out
+    }
+
     // ---- build-backend.sh / tasks Build Frontend ----
-    fun buildBackend(p: Paths, profile: String) = runner.run("Build Backend", Modules.backendBuild().size) {
-        Modules.backendBuild().forEach { runBuild(p, it, profile) }
+    fun buildBackend(p: Paths, profile: String): Unit {
+        val steps = Modules.backendBuild(p.workspace) { runner.log("AVISO: ciclo de dependencias entre ${it.joinToString()}; a usar a ordem fixa.", ConsoleViewContentType.ERROR_OUTPUT) }
+        runner.run("Build Backend", steps.size) {
+            runner.log("Ordem de build (pelas dependencias dos pom.xml): ${steps.filter { it.withProfile }.joinToString(" → ") { it.label }}")
+            steps.forEach { runBuild(p, it, profile) }
+        }
     }
 
     fun buildFrontend(p: Paths, profile: String, fast: Boolean, threads: String = "1C") =
@@ -104,15 +140,55 @@ class Operations(private val runner: TaskRunner, private val wlRunner: TaskRunne
             Modules.frontendBuild(fast, threads).forEach { runBuild(p, it, profile) }
         }
 
+    /** Backend (ordenado pelas dependencias) e a seguir o frontend, numa so tarefa; para no primeiro erro. */
+    fun buildAll(p: Paths, profile: String) {
+        val be = Modules.backendBuild(p.workspace) { runner.log("AVISO: ciclo de dependencias entre ${it.joinToString()}; a usar a ordem fixa.", ConsoleViewContentType.ERROR_OUTPUT) }
+        val fe = Modules.frontendBuild(false)
+        runner.run("Build Backend + Frontend", be.size + fe.size) {
+            runner.log("Backend (pelas dependencias dos pom.xml): ${be.filter { it.withProfile }.joinToString(" → ") { it.label }}")
+            be.forEach { runBuild(p, it, profile) }
+            runner.log("Backend concluido — a seguir o frontend.")
+            fe.forEach { runBuild(p, it, profile) }
+        }
+    }
+
     /** Build de varios modulos (backend e/ou frontend) numa so tarefa, pela ordem recebida. */
-    fun buildModules(p: Paths, entries: List<ModuleEntry>, profile: String) =
-        runner.run(if (entries.size == 1) "Build ${entries[0].name}" else "Build de ${entries.size} modulos", entries.size) {
-            for (e in entries) {
+    fun buildModules(p: Paths, entries: List<ModuleEntry>, profile: String) {
+        // o que o utilizador escolhe pode vir em qualquer ordem: o backend e' ordenado pelas dependencias dos pom.xml
+        val ordered = Modules.orderEntries(p.workspace, entries)
+        runner.run(if (ordered.size == 1) "Build ${ordered[0].name}" else "Build de ${ordered.size} modulos", ordered.size) {
+            if (ordered.size > 1) runner.log("Ordem de build (pelas dependencias): ${ordered.joinToString(" → ") { it.name }}")
+            for (e in ordered) {
                 val step = when (e.kind) {
                     Kind.BACKEND -> Modules.backendBuild().first { it.label == e.name }
                     Kind.FRONTEND -> Modules.frontendModuleBuild(e.name)
                 }
                 runBuild(p, step, profile)
+            }
+        }
+    }
+
+    /** Modulos de deploy que ja tem artefacto (war/jar) no target/ e os que ficam de fora. */
+    fun deployableAll(p: Paths): Pair<List<ModuleEntry>, List<String>> {
+        val ok = ArrayList<ModuleEntry>()
+        val skipped = ArrayList<String>()
+        for (e in Modules.deployEntries()) {
+            try {
+                if (e.kind == Kind.BACKEND) findArtifact(p.workspace.resolve(e.name).resolve("target"), e.name, if (e.name == Modules.JAR_MODULE) "jar" else "war")
+                else findArtifact(p.workspace.resolve("spms-plugins/${Modules.frontendDeploy.getValue(e.name)}/${e.name}/target"), e.name, "war")
+                ok += e
+            } catch (_: Exception) { skipped += e.name }
+        }
+        return ok to skipped
+    }
+
+    /** Deploy de tudo o que foi construido: backend e depois frontend. */
+    fun deployAll(p: Paths, entries: List<ModuleEntry>, skipped: List<String>) =
+        runner.run("Deploy Backend + Frontend (${entries.size} modulos)", entries.size) {
+            if (skipped.isNotEmpty()) runner.log("Sem artefacto (nao construidos), ignorados: ${skipped.joinToString()}")
+            for (e in entries) when (e.kind) {
+                Kind.BACKEND -> deployBackendOne(p, e.name)
+                Kind.FRONTEND -> deployFrontendOne(p, e.name)
             }
         }
 
@@ -125,11 +201,7 @@ class Operations(private val runner: TaskRunner, private val wlRunner: TaskRunne
         }
 
     private fun TaskRunner.Steps.runBuild(p: Paths, b: BuildStep, profile: String) {
-        val profiles = profile.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
-        if (b.dir == LOCAL_MOCK_MODULE && localMock() && LOCAL_MOCK_PROFILE !in profiles) profiles += LOCAL_MOCK_PROFILE
-        val prof = if (b.withProfile && profiles.isNotEmpty()) " -P${profiles.joinToString(",")}" else ""
-        val skip = if (b.withProfile && skipTests()) " -Dmaven.test.skip=true" else ""
-        shell(b.label, p.workspace.resolve(b.dir), "mvn ${b.goals}$prof$skip")
+        shell(b.label, p.workspace.resolve(b.dir), MavenCommands.build(b, profile, localMock(), skipTests(), MavenArgs.forStep(b.label, mavenArgs())))
     }
 
     // ---- deploy_backend_lnx.sh ----
@@ -250,8 +322,4 @@ class Operations(private val runner: TaskRunner, private val wlRunner: TaskRunne
         wlConsole.print("[plugin] WebLogic terminado.\n", ConsoleViewContentType.SYSTEM_OUTPUT)
     }
 
-    private companion object {
-        const val LOCAL_MOCK_MODULE = "pem-common-domain"
-        const val LOCAL_MOCK_PROFILE = "localMock"
-    }
 }

@@ -52,6 +52,10 @@ object Icons {
     val schema = LetterIcon("S", Color(0x5B6EAE), round = true)
     val schemaCurrent = LetterIcon("S", Color(0x3FA34D), round = true)
     val console = LetterIcon("›_", Color(0x5B6EAE))
+    val jobs = LetterIcon("⏰", Color(0x3D7EBF))
+    val jobOn = LetterIcon("J", Color(0x3FA34D), round = true)
+    val jobOff = LetterIcon("J", Color(0x8A8A8A), round = true)
+    val jobBad = LetterIcon("J", Color(0xD14B4B), round = true)
     val folder = LetterIcon("▸", Color(0x888888), round = true)
 
     private val column = LetterIcon("c", Color(0x4F8FBF), round = true)

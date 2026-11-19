@@ -45,6 +45,9 @@
       { "command": "oraStudio.rollback", "title": "Ora Studio: Rollback" },
       { "command": "oraStudio.toggleAutoCommit", "title": "Ora Studio: Alternar auto-commit" },
       { "command": "oraStudio.selectConnection", "title": "Ora Studio: Associar este ficheiro a uma ligação…" },
+      { "command": "oraStudio.openJob", "title": "Ora Studio: Abrir job agendado" },
+      { "command": "oraStudio.filterJobs", "title": "Ora Studio: Filtrar jobs por nome…", "icon": "$(filter)" },
+      { "command": "oraStudio.clearJobFilter", "title": "Ora Studio: Limpar filtro de jobs", "icon": "$(clear-all)" },
       { "command": "oraStudio.showError", "title": "Ora Studio: Mostrar erro completo" },
       { "command": "oraStudio.selectSchema", "title": "Ora Studio: Escolher o schema desta consola…", "icon": "$(symbol-namespace)" },
       { "command": "oraStudio.goToObject", "title": "Ora Studio: Ir para objeto…", "icon": "$(search)" },
@@ -64,6 +67,10 @@
         { "command": "oraStudio.refresh", "when": "view == oraStudio.connections", "group": "navigation@4" }
       ],
       "view/item/context": [
+        { "command": "oraStudio.filterJobs", "when": "view == oraStudio.connections && viewItem =~ /^jobs/", "group": "inline@1" },
+        { "command": "oraStudio.clearJobFilter", "when": "view == oraStudio.connections && viewItem == jobsFiltered", "group": "inline@2" },
+        { "command": "oraStudio.filterJobs", "when": "view == oraStudio.connections && viewItem =~ /^jobs/", "group": "1_jobs@1" },
+        { "command": "oraStudio.clearJobFilter", "when": "view == oraStudio.connections && viewItem == jobsFiltered", "group": "1_jobs@2" },
         { "command": "oraStudio.connect", "when": "view == oraStudio.connections && viewItem == connection", "group": "1_conn@1" },
         { "command": "oraStudio.disconnect", "when": "view == oraStudio.connections && viewItem == connectionOn", "group": "1_conn@1" },
         { "command": "oraStudio.newConsole", "when": "view == oraStudio.connections && viewItem =~ /^connection/", "group": "1_conn@2" },

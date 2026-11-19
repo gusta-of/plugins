@@ -1,6 +1,52 @@
 package pt.pem.tools
 
+import java.nio.file.Path
+
 /** Um passo de build Maven: [dir] relativo a workspace, [goals] sem o perfil. */
+/** Comando `mvn` de cada passo de build (puro, para poder ser testado). */
+object MavenCommands {
+    const val LOCAL_MOCK_MODULE = "pem-common-domain"
+    const val LOCAL_MOCK_PROFILE = "localMock"
+    const val FAST_BUILD_PROFILE = "fast-build"
+
+    /**
+     * O pem/pom.xml fixa `<skipTests>false</skipTests>` no surefire/failsafe, o que ganha a qualquer -D da linha de
+     * comandos: so o perfil `fast-build` (desliga surefire, failsafe e jacoco) garante que os testes nao correm.
+     */
+    fun build(b: BuildStep, profile: String, localMock: Boolean, skipTests: Boolean, extra: String = ""): String {
+        val profiles = profile.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
+        if (b.dir == LOCAL_MOCK_MODULE && localMock && LOCAL_MOCK_PROFILE !in profiles) profiles += LOCAL_MOCK_PROFILE
+        val skipping = b.withProfile && skipTests
+        if (skipping && FAST_BUILD_PROFILE !in profiles) profiles += FAST_BUILD_PROFILE
+        val prof = if (b.withProfile && profiles.isNotEmpty()) " -P${profiles.joinToString(",")}" else ""
+        val skip = if (skipping) " -DskipTests -DskipITs -Dmaven.test.skip=true" else ""
+        return "mvn ${b.goals}$prof$skip" + if (extra.isBlank()) "" else " $extra"
+    }
+}
+
+/** Parametros extra do mvn: a chave `*` vale para todos os builds, as outras sao o nome do modulo. */
+object MavenArgs {
+    const val ALL = "*"
+
+    fun clean(s: String?): String = (s ?: "").replace(Regex("[\\r\\n]+"), " ").trim()
+
+    fun forStep(label: String, args: Map<String, String>): String =
+        listOf(clean(args[ALL]), clean(args[label])).filter { it.isNotEmpty() }.joinToString(" ")
+
+    data class PomModule(val name: String, val dir: String, val kind: Kind)
+
+    /** Modulos com pom.xml que tem build (backend e frontend), sem repeticoes. */
+    fun modules(): List<PomModule> {
+        val seen = HashSet<String>()
+        val out = ArrayList<PomModule>()
+        fun add(n: String, d: String, k: Kind) { if (seen.add(n)) out += PomModule(n, d, k) }
+        Modules.backendBuild().forEach { add(it.label, it.dir, Kind.BACKEND) }
+        Modules.frontendBuild(false).forEach { add(it.label, it.dir, Kind.FRONTEND) }
+        Modules.frontendDeploy.forEach { (n, sub) -> add(n, "spms-plugins/$sub/$n", Kind.FRONTEND) }
+        return out
+    }
+}
+
 data class BuildStep(val label: String, val dir: String, val goals: String, val withProfile: Boolean = true)
 
 object Modules {
@@ -19,6 +65,28 @@ object Modules {
         }
         add(BuildStep("pem-bkf-app", "pem-bkf-app", "clean install -rf :pem-bkf-app war:war"))
         add(BuildStep("Test report backend", "pem", "allure:aggregate", withProfile = false))
+    }
+
+    /**
+     * Passos do backend com os modulos ordenados pelas dependencias dos pom.xml de [workspace]
+     * (a ordem fixa de build-backend.sh estava errada p.ex. para pem-common-app / spms-plugins-common).
+     * Os dois primeiros passos (pem-common-beans e o reactor «pem») e o relatorio final mantem-se nas pontas.
+     */
+    fun backendBuild(workspace: Path, onCycle: (List<String>) -> Unit = {}): List<BuildStep> {
+        val fixed = backendBuild()
+        val head = fixed.take(2)
+        val tail = fixed.filter { !it.withProfile }
+        val middle = fixed.drop(2).filter { it.withProfile }
+        val deps = BuildOrder.dependencies(workspace, middle.map { it.dir })
+        val order = BuildOrder.sort(middle.map { it.dir }, deps, onCycle)
+        return head + order.map { d -> middle.first { it.dir == d } } + tail
+    }
+
+    /** Ordena a selecao do utilizador: modulos do backend pela ordem de dependencias, depois os do frontend (ordem recebida). */
+    fun orderEntries(workspace: Path, entries: List<ModuleEntry>): List<ModuleEntry> {
+        val steps = backendBuild(workspace).map { it.label }
+        val backend = entries.filter { it.kind == Kind.BACKEND }.sortedBy { e -> steps.indexOf(e.name).let { if (it < 0) Int.MAX_VALUE else it } }
+        return backend + entries.filter { it.kind != Kind.BACKEND }
     }
 
     fun frontendBuild(fast: Boolean, threads: String = "1C"): List<BuildStep> = listOf(

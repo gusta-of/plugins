@@ -9,6 +9,8 @@ export interface WlApp {
   /** último estado de deployment visto (ex.: "STATE_PREPARED") */
   detail?: string;
   error?: string;
+  /** vem de liferay/deploy: o Liferay faz o hot deploy depois do servidor estar RUNNING, só fica pronto com o sinal próprio */
+  hot?: boolean;
 }
 
 const MAX_ERROR_LINES = 150;
@@ -24,6 +26,21 @@ export function expectedApps(domain: string): string[] {
       if (n) out.push(n[1].trim());
     }
     return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Nome do artefacto de um .war de liferay/deploy: `pem-crd-portlet-2.3.0.war` -> `pem-crd-portlet`. */
+export function warAppName(file: string): string {
+  const m = /^(.*?)-\d[^/]*\.war$/.exec(file);
+  return m ? m[1] : file.replace(/\.war$/, '');
+}
+
+/** Artefactos que o Liferay vai fazer hot deploy ao arrancar (os .war em liferay/deploy). */
+export function hotDeployApps(domain: string): string[] {
+  try {
+    return fs.readdirSync(path.join(domain, 'liferay', 'deploy')).filter((f) => f.endsWith('.war')).map(warAppName);
   } catch {
     return [];
   }
@@ -51,6 +68,7 @@ export class WlWatcher {
     this.apps.clear();
     this.serverState = 'STARTING';
     for (const name of expectedApps(domain)) this.apps.set(name, { name, state: 'pending' });
+    for (const name of hotDeployApps(domain)) { const a = this.apps.get(name) ?? { name, state: 'pending' as AppState }; a.hot = true; this.apps.set(name, a); }
     this.file = path.join(domain, 'servers', serverName, 'logs', `${serverName}.log`);
     try { this.pos = fs.statSync(this.file).size; } catch { this.pos = 0; }
     this.rest = '';
@@ -111,7 +129,15 @@ export class WlWatcher {
     }
 
     const st = /Server state changed to ([A-Z_]+)/.exec(line);
-    if (st) { this.serverState = st[1]; this.onChange(); return; }
+    if (st) {
+      this.serverState = st[1];
+      if (['STANDBY', 'ADMIN', 'RESUMING'].includes(st[1])) for (const a of this.apps.values()) if (a.state === 'pending') a.state = 'loading';
+      // o servidor só chega a RUNNING com os deployments feitos (os que falharam já foram marcados pelo erro);
+      // artefactos não (re)deployados nesta subida não escrevem transições no log, ficam prontos aqui.
+      if (st[1] === 'RUNNING') for (const a of this.apps.values()) if (!a.hot && a.state !== 'failed' && a.state !== 'ready') { a.state = 'ready'; if (!a.detail) a.detail = 'já deployado'; }
+      this.onChange();
+      return;
+    }
 
     const tr = /Module (\S+) of application (\S+) (?:\[[^\]]*\] )?(?:successfully )?transitioned from STATE_(\w+) to STATE_(\w+)/.exec(line);
     if (tr) {

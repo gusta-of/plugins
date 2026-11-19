@@ -46,6 +46,8 @@ class PemToolWindowFactory : ToolWindowFactory, DumbAware {
         val wlConsole = TaskRunner.newConsole()
         val runner = TaskRunner(project, taskConsole)
         val wlRunner = TaskRunner(project, wlConsole)
+        taskConsole.project = project
+        wlConsole.project = project
         val ops = Operations(runner, wlRunner)
         val wlWatch = WlWatcher()
         ops.onWebLogicStart = { wlWatch.start(it.domain) }
@@ -79,6 +81,7 @@ class PemToolWindowFactory : ToolWindowFactory, DumbAware {
             addActionListener { settings.localMock = isSelected }
         }
         ops.localMock = { localMock.isSelected }
+        ops.mavenArgs = { settings.mavenArgs.toMap() }
 
         val form = FormBuilder.createFormBuilder()
             .addLabeledComponent(JBLabel("Workspace:"), workspaceField)
@@ -117,6 +120,25 @@ class PemToolWindowFactory : ToolWindowFactory, DumbAware {
             JButton(text).apply { toolTipText = tip; addActionListener { action() } }
 
         fun withPaths(block: (Paths) -> Unit) = { paths()?.let(block); Unit }
+
+        fun repairGitFlow(p: Paths, hash: String?) {
+            val ok = Messages.showYesNoDialog(project,
+                "Vai correr «git repack -a -d», remover o multi-pack-index e «git prune-packed» em:\n${p.workspace}\n\nNao apaga historico; em repositorios grandes pode demorar alguns minutos.",
+                "Reparar repositorio git", "Reparar", "Cancelar", Messages.getWarningIcon())
+            if (ok == Messages.YES) ops.repairGit(p, hash)
+        }
+        runner.onDiagnosis = { d ->
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+                val fix = "Reparar repositorio git"; val skip = "Ignorar o git-commit-id"
+                val c = Messages.showDialog(project, d.summary + "\n\nO que fazer?", "Falha conhecida no build", arrayOf(fix, skip, "Nada"), 0, Messages.getWarningIcon())
+                if (c == 0) paths()?.let { repairGitFlow(it, d.hash) }
+                else if (c == 1) {
+                    val merged = BuildDiagnosis.withGlobalArg(settings.mavenArgs.toMap(), BuildDiagnosis.GIT_COMMIT_ID_SKIP)
+                    settings.mavenArgs.clear(); settings.mavenArgs.putAll(merged)
+                    notify(project, "Acrescentei ${BuildDiagnosis.GIT_COMMIT_ID_SKIP} aos parametros Maven de todos os modulos (engrenagem da seccao Build). Corre o build outra vez.", NotificationType.INFORMATION)
+                }
+            }
+        }
 
         val tabs = JBTabbedPane().apply {
             addTab("Tarefas", taskConsole)
@@ -189,12 +211,18 @@ class PemToolWindowFactory : ToolWindowFactory, DumbAware {
                 if (ok == Messages.YES) ops.clearClasspath(p)
             }))
                 add(tb(AllIcons.Actions.DeleteTag, "Limpar pastas target/ (clean-targets.sh)", action = withPaths { ops.cleanTargets(it) }))
+                add(tb(AllIcons.Vcs.Branch, "Reparar o repositorio git do workspace (git repack) — corrige «Missing tree» do git-commit-id-plugin", action = withPaths { repairGitFlow(it, null) }))
                 add(tb(AllIcons.Debugger.KillProcess, "Matar processos java dos modulos (kill-module-jars.sh)") { ops.killModuleJars() })
             })
             add(group("Build") {
                 add(tb(AllIcons.Actions.Compile, "Build Backend (build-backend.sh)", "BE", action = withPaths { ops.buildBackend(it, profile()) }))
                 add(tb(AllIcons.Actions.Compile, "Build Frontend (mvn clean install em spms-plugins)", "FE", action = withPaths { ops.buildFrontend(it, profile(), fast = false) }))
                 add(tb(AllIcons.Actions.Compile, "Build Frontend rapido (usa o campo Threads -T; padrao 1C)", "FE ⚡", action = withPaths { ops.buildFrontend(it, profile(), fast = true, threads = threads()) }))
+                add(tb(AllIcons.Actions.Execute, "Build Backend + Frontend de uma vez (backend ordenado pelas dependencias; depois o frontend)", "BE+FE", action = withPaths { ops.buildAll(it, profile()) }))
+                add(tb(AllIcons.General.Settings, "Parametros Maven por modulo (ex.: -Dmaven.gitcommitid.skip=true)...", action = {
+                    val d = MavenParamsDialog(project, settings.mavenArgs.toMap())
+                    if (d.showAndGet()) { settings.mavenArgs.clear(); settings.mavenArgs.putAll(d.result()) }
+                }))
                 add(tb(AllIcons.Nodes.Module, "Build de modulos isolados (varios; backend e/ou frontend)...", action = withPaths { p ->
                 val d = ModulePickerDialog(project, "Build isolado", "Build", Modules.buildEntries())
                 if (d.showAndGet()) ops.buildModules(p, d.selected(), profile())
@@ -208,6 +236,15 @@ class PemToolWindowFactory : ToolWindowFactory, DumbAware {
                 add(tb(AllIcons.Actions.Upload, "Deploy Frontend (varios modulos)...", "FE", action = withPaths { p ->
                 val d = DeployDialog(project, "Deploy Frontend", Modules.frontendDeploy.keys.toList())
                 if (d.showAndGet()) ops.deployFrontend(p, d.selected())
+            }))
+                add(tb(AllIcons.Actions.Execute, "Deploy Backend + Frontend de tudo o que esta construido (pede confirmacao; ignora modulos sem artefacto)", "BE+FE", action = withPaths { p ->
+                val (entries, skipped) = ops.deployableAll(p)
+                if (entries.isEmpty()) { Messages.showWarningDialog(project, "Nenhum modulo com artefacto em target/: corre o build primeiro.", "Deploy BE+FE"); return@withPaths }
+                val nb = entries.count { it.kind == Kind.BACKEND }
+                val ok = Messages.showYesNoDialog(project,
+                    "Deploy de ${entries.size} modulos ($nb backend + ${entries.size - nb} frontend)" + if (skipped.isEmpty()) "" else "\n${skipped.size} sem artefacto serao ignorados.",
+                    "Deploy BE+FE", "Fazer deploy", "Cancelar", Messages.getQuestionIcon())
+                if (ok == Messages.YES) ops.deployAll(p, entries, skipped)
             }))
                 add(tb(AllIcons.Nodes.Module, "Deploy de modulos isolados (varios; backend e/ou frontend)...", action = withPaths { p ->
                 val d = ModulePickerDialog(project, "Deploy isolado", "Deploy", Modules.deployEntries())

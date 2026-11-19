@@ -28,6 +28,7 @@ test('estado de cada artefacto: espera → a carregar → pronto, e falha com de
   assert.equal(w.serverState, 'STANDBY');
   w.feed('####<28/out/2026 11H38m UTC> <Info> <Deployer> <h> <AdminServer> <t> <<WLS Kernel>> <> <id> <1> <[sev]> <BEA-149060> <Module pem-crd-portlet of application pem-crd-portlet successfully transitioned from STATE_NEW to STATE_PREPARED on server AdminServer.>', 'file');
   assert.equal(w.apps.get('pem-crd-portlet')!.state, 'loading');
+  assert.equal(w.apps.get('liferay')!.state, 'loading'); // STANDBY: fase de deployments
   w.feed('<BEA-149060> <Module pem-crd-portlet of application pem-crd-portlet successfully transitioned from STATE_ADMIN to STATE_ACTIVE on server AdminServer.>', 'file');
   assert.equal(w.apps.get('pem-crd-portlet')!.state, 'ready');
 
@@ -44,7 +45,9 @@ test('estado de cada artefacto: espera → a carregar → pronto, e falha com de
   // um artefacto que falhou não volta a "pronto" por uma transição posterior
   w.feed('<BEA-149060> <Module integration-portlet of application integration-portlet successfully transitioned from STATE_ADMIN to STATE_ACTIVE on server AdminServer.>');
   assert.equal(bad.state, 'failed');
-  assert.deepEqual(w.counts(), { ready: 1, loading: 1, failed: 1, total: 3 });
+  // RUNNING: o artefacto "liferay" nunca escreveu transições (não foi redeployado) e fica pronto; o falhado mantém-se
+  assert.equal(w.apps.get('liferay')!.state, 'ready');
+  assert.deepEqual(w.counts(), { ready: 2, loading: 0, failed: 1, total: 3 });
   w.stop();
 });
 
@@ -84,4 +87,24 @@ test('o TaskRunner regista o resultado de cada passo, com a saída dos que falha
   assert.match(r.results[2].output, /falhou em TS/);
   assert.ok(notified >= 6);
   assert.equal(r.resultsTitle, 'Build teste');
+});
+
+test('artefactos em liferay/deploy (hot deploy) entram na lista e só ficam prontos com o sinal próprio', async () => {
+  const { hotDeployApps, warAppName } = await import('../src/wlStatus');
+  assert.equal(warAppName('pem-crd-portlet-2.3.0.war'), 'pem-crd-portlet');
+  assert.equal(warAppName('liferay-theme.war'), 'liferay-theme');
+  const d = mk();
+  fs.mkdirSync(path.join(d, 'liferay', 'deploy'), { recursive: true });
+  for (const f of ['pem-crd-portlet-2.3.0.war', 'pem-med-portlet-2.3.0.war', 'readme.txt']) fs.writeFileSync(path.join(d, 'liferay', 'deploy', f), '');
+  assert.deepEqual(hotDeployApps(d).sort(), ['pem-crd-portlet', 'pem-med-portlet']);
+  const w = new WlWatcher();
+  w.start(d);
+  assert.deepEqual([...w.apps.keys()].sort(), ['integration-portlet', 'liferay', 'pem-crd-portlet', 'pem-med-portlet']);
+  w.feed('<Notice> <WebLogicServer> <BEA-000365> <Server state changed to RUNNING.>');
+  assert.equal(w.apps.get('liferay')!.state, 'ready');          // já estava deployado
+  assert.notEqual(w.apps.get('pem-crd-portlet')!.state, 'ready'); // o hot deploy ainda vai acontecer
+  w.feed('<BEA-149060> <Module pem-crd-portlet of application pem-crd-portlet successfully transitioned from STATE_ADMIN to STATE_ACTIVE on server AdminServer.>');
+  assert.equal(w.apps.get('pem-crd-portlet')!.state, 'ready');
+  assert.notEqual(w.apps.get('pem-med-portlet')!.state, 'ready');
+  w.stop();
 });

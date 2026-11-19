@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import com.google.gson.TypeAdapter
 import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonWriter
+import orastudio.MetadataService
 import orastudio.AppLog
 import orastudio.AppPaths
 import orastudio.ColumnMeta
@@ -36,7 +37,15 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-private class ConsoleSession(val id: String, val connId: String, val session: DbSession)
+private class ConsoleSession(val id: String, val connId: String, @Volatile var session: DbSession) {
+    /** ultimo schema/autocommit pedidos, para reabrir a sessao com o mesmo estado se a ligacao morrer */
+    @Volatile var schema: String? = null
+    @Volatile var autoCommit: Boolean? = null
+    /** execucao em curso (para a poder dar por terminada se o cancelar nao resolver) */
+    @Volatile var activeRunId: String? = null
+    /** a ligacao foi cortada para cancelar: nada mais deve ser notificado por esta sessao */
+    @Volatile var abandoned = false
+}
 private class CursorEntry(val ownerId: String, val session: DbSession, val cursor: ResultCursor)
 
 /**
@@ -183,8 +192,10 @@ class RpcServer(private val input: InputStream, output: OutputStream) {
         "connection.needsPassword" -> handleFor(p.str("id")).needsPassword()
         "disconnect" -> {
             val id = p.str("id")
-            handles[id]?.disconnect()
-            sessions.values.filter { it.connId == id }.forEach { closeSession(it.id) }
+            // desligar nunca falha: cada parte e' fechada de forma independente (sessoes ja fechadas/cortadas incluidas)
+            try { handles[id]?.disconnect() } catch (e: Throwable) { AppLog.error("disconnect $id", e) }
+            sessions.values.filter { it.connId == id }.forEach { try { closeSession(it.id) } catch (e: Throwable) { AppLog.error("fechar sessao", e) } }
+            try { dataSessions.remove(id)?.close() } catch (e: Throwable) { AppLog.error("fechar sessao de dados", e) }
             true
         }
         "meta.schemas" -> handleFor(p.str("id")).metadata.listSchemas()
@@ -194,13 +205,17 @@ class RpcServer(private val input: InputStream, output: OutputStream) {
         "meta.constraints" -> handleFor(p.str("id")).metadata.constraints(p.ref())
         "meta.indexes" -> handleFor(p.str("id")).metadata.indexes(p.ref())
         "meta.triggers" -> handleFor(p.str("id")).metadata.triggersOn(p.ref())
+        "meta.referencedBy" -> handleFor(p.str("id")).metadata.referencedBy(p.ref())
         "meta.uses" -> handleFor(p.str("id")).metadata.uses(p.ref())
         "meta.usedBy" -> handleFor(p.str("id")).metadata.usedBy(p.ref())
         "meta.ddl" -> handleFor(p.str("id")).metadata.ddl(p.ref(), p.bool("body", false))
         "meta.hasBody" -> handleFor(p.str("id")).metadata.hasBody(p.ref())
         "meta.synonymTarget" -> handleFor(p.str("id")).metadata.synonymTarget(p.ref())?.let { mapOf("owner" to it.first, "name" to it.second) }
         "meta.findExact" -> handleFor(p.str("id")).metadata.findExact(p.str("owner"), p.str("name"))
-        "meta.search" -> handleFor(p.str("id")).metadata.search(p.str("text"), p.optStr("preferOwner"), p.int("limit", 200))
+        "meta.search" -> handleFor(p.str("id")).metadata.search(p.str("text"), p.optStr("preferOwner"), p.int("limit", 200),
+            MetadataService.SearchOptions(p.bool("regex", false), p.bool("matchCase", false), p.bool("wholeWord", false)))
+        "meta.jobs" -> handleFor(p.str("id")).metadata.jobs()
+        "meta.jobRuns" -> handleFor(p.str("id")).metadata.jobRuns(p.str("owner"), p.str("name"), p.int("limit", 30))
         "meta.currentSchema" -> { val h = handleFor(p.str("id")); h.metaSession(); h.currentSchema }
 
         // ---- "ir para a definicao" e autocompletar ----
@@ -224,15 +239,21 @@ class RpcServer(private val input: InputStream, output: OutputStream) {
                 s.conn.autoCommit = p.bool("autoCommit", h.config.autoCommit)
                 p.optStr("schema")?.takeIf { it.isNotBlank() }?.let { applySchema(s, it) }
             }
-            sessions[sid] = ConsoleSession(sid, h.config.id, s)
+            // melhor esforco: guarda "sid,serial#" para poder matar a sessao no servidor se o cancelar nao chegar
+            s.serverSid = try {
+                s.sync { s.conn.createStatement().use { st -> st.executeQuery("SELECT sid || ',' || serial# FROM v\$session WHERE sid = SYS_CONTEXT('USERENV','SID')").use { rs -> if (rs.next()) rs.getString(1) else null } } }
+            } catch (_: Throwable) { null }
+            sessions[sid] = ConsoleSession(sid, h.config.id, s).also { it.schema = p.optStr("schema")?.takeIf { x -> x.isNotBlank() }; it.autoCommit = p.bool("autoCommit", h.config.autoCommit) }
             mapOf("sessionId" to sid)
         }
         "session.close" -> { closeSession(p.str("sessionId")); true }
-        "session.cancel" -> { sessions[p.str("sessionId")]?.session?.cancelCurrent(); true }
+        "session.cancel" -> { sessions[p.str("sessionId")]?.let { cancelRun(it, force = p.bool("force", false)) }; true }
         "session.schema" -> {
-            val s = session(p).session
+            val cs = session(p)
+            val s = cs.session
             val schema = p.str("schema")
             s.sync { applySchema(s, schema) }
+            cs.schema = schema
             true
         }
         "session.autoCommit" -> {
@@ -256,6 +277,56 @@ class RpcServer(private val input: InputStream, output: OutputStream) {
     }
 
     private fun session(p: JsonObject): ConsoleSession = sessions[p.str("sessionId")] ?: error("sessao fechada")
+
+    /**
+     * Cancela a execucao: pede ao Oracle para interromper e, se ao fim de ~2,5 s (ou logo, com [force]) ainda nao terminou,
+     * corta a ligacao, termina a sessao no servidor se o utilizador puder, e da a execucao por concluida. Assim a consola
+     * nunca fica presa a uma consulta pesada; a proxima execucao abre uma sessao nova.
+     */
+    private fun cancelRun(cs: ConsoleSession, force: Boolean) {
+        val runId = cs.activeRunId ?: return
+        notify("run/cancelling", mapOf("runId" to runId, "force" to force))
+        cs.session.cancelCurrent(if (force) 0 else 2500) {
+            if (cs.activeRunId != runId || cs.abandoned) return@cancelCurrent
+            cs.abandoned = true
+            AppLog.info("Cancelar: a consulta nao respondeu; ligacao cortada (sessao ${cs.id})")
+            cs.session.serverSid?.let { sid ->
+                // melhor esforco (precisa de ALTER SYSTEM): liberta tambem o servidor
+                Thread({
+                    try {
+                        val m = handleFor(cs.connId).metaSession()
+                        m.sync { m.conn.createStatement().use { st -> st.execute("ALTER SYSTEM KILL SESSION '$sid' IMMEDIATE") } }
+                    } catch (_: Throwable) { /* sem privilegio: a sessao termina quando a consulta acabar */ }
+                }, "kill-session").apply { isDaemon = true }.start()
+            }
+            notify("run/done", mapOf("runId" to runId, "cancelled" to true, "forced" to true, "sessionLost" to true))
+            cs.activeRunId = null
+            closeSession(cs.id)
+        }
+    }
+
+    /**
+     * Depois de muito tempo parado a ligacao pode ter sido cortada (firewall/NAT/VPN) sem o cliente saber:
+     * a proxima instrucao ficava pendurada para sempre. Valida antes de executar e, se estiver morta, reabre
+     * (mesmo schema/autocommit; a transacao pendente perde-se, o que ja aconteceu com a ligacao).
+     */
+    private fun revive(cs: ConsoleSession, h: ConnectionHandle) {
+        val old = cs.session
+        if (old.isValid()) return
+        try { old.abortConnection() } catch (_: Throwable) {}
+        try { old.close() } catch (_: Throwable) {}
+        val s = h.openSession("console")
+        s.sync {
+            cs.autoCommit?.let { s.conn.autoCommit = it }
+            cs.schema?.let { applySchema(s, it) }
+        }
+        s.serverSid = try {
+            s.sync { s.conn.createStatement().use { st -> st.executeQuery("SELECT sid || ',' || serial# FROM v\$session WHERE sid = SYS_CONTEXT('USERENV','SID')").use { rs -> if (rs.next()) rs.getString(1) else null } } }
+        } catch (_: Throwable) { null }
+        cursors.entries.filter { it.value.ownerId == cs.id }.forEach { cursors.remove(it.key) }
+        cs.session = s
+        notify("session/reconnected", mapOf("sessionId" to cs.id))
+    }
 
     private fun closeSession(sid: String) {
         val cs = sessions.remove(sid) ?: return
@@ -284,12 +355,16 @@ class RpcServer(private val input: InputStream, output: OutputStream) {
             return mapOf("runId" to runId, "statements" to plan)
         }
         val h = handleFor(cs.connId)
+        revive(cs, h)
+        cs.abandoned = false
+        cs.activeRunId = runId
         val listener = object : RunListener {
             private fun head(st: Stmt) = mapOf("runId" to runId, "start" to st.start, "end" to st.end, "text" to st.text)
 
             override fun onStart(index: Int, total: Int, stmt: Stmt) = notify("run/start", head(stmt) + mapOf("index" to index, "total" to total))
 
             override fun onOutcome(outcome: Outcome) {
+                if (cs.abandoned) return
                 val base0 = head(outcome.stmt) + mapOf("elapsedMs" to outcome.elapsedMs)
                 when (outcome) {
                     is QueryOutcome -> {
@@ -309,10 +384,15 @@ class RpcServer(private val input: InputStream, output: OutputStream) {
             }
 
             override fun onOutput(lines: List<String>) = notify("run/output", mapOf("runId" to runId, "lines" to lines))
-            override fun onDone(cancelled: Boolean) = notify("run/done", mapOf("runId" to runId, "cancelled" to cancelled))
+            override fun onDone(cancelled: Boolean) {
+                if (cs.abandoned) return
+                cs.activeRunId = null
+                notify("run/done", mapOf("runId" to runId, "cancelled" to cancelled))
+            }
         }
         cs.session.submit { SqlRunner.run(cs.session, stmts, rowLimit, stopOnError, listener) }.whenComplete { _, err ->
-            if (err != null) {
+            if (err != null && !cs.abandoned) {
+                cs.activeRunId = null
                 notify("run/error", mapOf("runId" to runId, "index" to -1, "start" to 0, "end" to 0, "text" to "", "elapsedMs" to 0,
                     "message" to (err.message ?: err.toString()), "code" to 0, "position" to -1))
                 notify("run/done", mapOf("runId" to runId, "cancelled" to false))

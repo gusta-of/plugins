@@ -22,6 +22,8 @@ class SqlConsolePanel(private val app: AppContext, val handle: ConnectionHandle,
 
     private var session: DbSession? = null
     private var running = false
+    /** ja pediu cancelar esta execucao (um 2.o clique forca o corte da ligacao) */
+    private var cancelling = false
     val busy: Boolean get() = running
     fun resultTabCount() = results.tabCount
     fun showResults() { bottom.selectedIndex = 0 }
@@ -76,7 +78,7 @@ class SqlConsolePanel(private val app: AppContext, val handle: ConnectionHandle,
 
         runBtn.addActionListener { runCurrent() }
         scriptBtn.addActionListener { runScript() }
-        stopBtn.addActionListener { session?.cancelCurrent() }
+        stopBtn.addActionListener { cancelRun() }
         commitBtn.addActionListener { tx("COMMIT") }
         rollbackBtn.addActionListener { tx("ROLLBACK") }
         autoCommit.addActionListener { setAutoCommit(autoCommit.isSelected) }
@@ -175,6 +177,31 @@ class SqlConsolePanel(private val app: AppContext, val handle: ConnectionHandle,
         }
     }
 
+    /** 1.o clique: pede ao Oracle para interromper; 2.o clique (ou sem resposta em ~2,5 s): corta a ligacao e liberta a consola. */
+    private fun cancelRun() {
+        val s = session ?: return
+        if (!running) return
+        val force = cancelling
+        cancelling = true
+        state.text = if (force) "A cortar a ligação…" else "A cancelar… (clique outra vez para forçar)"
+        log.log(if (force) "■ A cortar a ligação…" else "■ A cancelar… (se o Oracle não responder em ~2,5 s a ligação é cortada; clicar de novo força já)", ConsoleLog.Kind.WARN)
+        s.cancelCurrent(if (force) 0 else 2500) { edt { forcedFinish(s) } }
+    }
+
+    /** A ligacao foi cortada para cancelar: a execucao termina e a proxima abre uma sessao nova. */
+    private fun forcedFinish(s: DbSession) {
+        if (session !== s || !running) return
+        running = false
+        cancelling = false
+        tick.stop()
+        session = null
+        s.close()
+        state.text = "Sem sessão"
+        log.log("A ligação foi cortada para cancelar a consulta. A transação desta consola foi perdida; a próxima execução abre uma sessão nova.", ConsoleLog.Kind.WARN)
+        bottom.selectedIndex = 1
+        updateButtons()
+    }
+
     private fun setAutoCommit(on: Boolean) {
         updateButtons()
         val s = session ?: return
@@ -219,6 +246,7 @@ class SqlConsolePanel(private val app: AppContext, val handle: ConnectionHandle,
     private fun run(stmts: List<Stmt>) {
         if (running) return
         running = true
+        cancelling = false
         updateButtons()
         clearErrorMark()
         closeResults()
@@ -271,7 +299,9 @@ class SqlConsolePanel(private val app: AppContext, val handle: ConnectionHandle,
                 }
 
                 override fun onDone(cancelled: Boolean) = edt {
+                    if (session !== s) return@edt // sessao cortada: ja foi terminado em forcedFinish
                     running = false
+                    cancelling = false
                     tick.stop()
                     val total = (System.currentTimeMillis() - started) / 1000.0
                     clock.text = "%.1f s".format(total)

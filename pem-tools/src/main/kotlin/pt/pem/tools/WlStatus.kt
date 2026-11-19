@@ -8,7 +8,8 @@ import java.util.concurrent.TimeUnit
 
 enum class AppState { PENDING, LOADING, READY, FAILED }
 
-class WlApp(val name: String, var state: AppState = AppState.PENDING, var detail: String = "", var error: String? = null)
+/** [hot] = vem de liferay/deploy: o Liferay faz o hot deploy depois de o servidor estar RUNNING, por isso so fica pronto com o sinal proprio. */
+class WlApp(val name: String, var state: AppState = AppState.PENDING, var detail: String = "", var error: String? = null, var hot: Boolean = false)
 
 data class WlCounts(val ready: Int, val loading: Int, val failed: Int, val total: Int)
 
@@ -18,6 +19,16 @@ fun expectedApps(domain: Path): List<String> = try {
     Regex("<app-deployment>([\\s\\S]*?)</app-deployment>").findAll(xml).mapNotNull { m ->
         Regex("<name>([^<]+)</name>").find(m.groupValues[1])?.groupValues?.get(1)?.trim()
     }.toList()
+} catch (_: Exception) {
+    emptyList()
+}
+
+/** Nome do artefacto de um .war de liferay/deploy: `pem-crd-portlet-2.3.0.war` -> `pem-crd-portlet`. */
+fun warAppName(file: String): String = Regex("^(.*?)-\\d[^/]*\\.war$").find(file)?.groupValues?.get(1) ?: file.removeSuffix(".war")
+
+/** Artefactos que o Liferay vai fazer hot deploy ao arrancar (os .war que estao em liferay/deploy). */
+fun hotDeployApps(domain: Path): List<String> = try {
+    Files.list(domain.resolve("liferay/deploy")).use { s -> s.map { it.fileName.toString() }.filter { it.endsWith(".war") }.map(::warAppName).toList() }
 } catch (_: Exception) {
     emptyList()
 }
@@ -41,7 +52,7 @@ class WlWatcher {
     private val capturing = HashMap<String, Pair<String, MutableList<String>>?>()
 
     /** Copia estavel dos artefactos (para a UI). */
-    @Synchronized fun snapshot(): List<WlApp> = apps.values.map { WlApp(it.name, it.state, it.detail, it.error) }.sortedBy { it.name.lowercase() }
+    @Synchronized fun snapshot(): List<WlApp> = apps.values.map { WlApp(it.name, it.state, it.detail, it.error, it.hot) }.sortedBy { it.name.lowercase() }
 
     @Synchronized fun errorOf(name: String): String? = apps[name]?.error
 
@@ -58,6 +69,7 @@ class WlWatcher {
             apps.clear()
             serverState = "STARTING"
             expectedApps(domain).forEach { apps[it] = WlApp(it) }
+            hotDeployApps(domain).forEach { apps.getOrPut(it) { WlApp(it) }.hot = true }
             file = domain.resolve("servers/$serverName/logs/$serverName.log")
             pos = try { Files.size(file!!) } catch (_: Exception) { 0L }
             rest = ""
@@ -122,7 +134,17 @@ class WlWatcher {
                 else { if (cap.second.size < MAX_ERROR_LINES) cap.second += line; return }
             }
             val st = SERVER_STATE.find(line)
-            if (st != null) { serverState = st.groupValues[1]; changed = true }
+            if (st != null) {
+                serverState = st.groupValues[1]
+                when (serverState) {
+                    // fase de deployments: o que ainda nao deu sinal esta a carregar
+                    "STANDBY", "ADMIN", "RESUMING" -> apps.values.filter { it.state == AppState.PENDING }.forEach { it.state = AppState.LOADING }
+                    // o servidor so chega a RUNNING com os deployments feitos; os que falharam ja foram marcados pelo erro.
+                    // Artefactos que nao foram (re)deployados nesta subida nao escrevem transicoes no log, por isso ficam prontos aqui.
+                    "RUNNING" -> apps.values.filter { !it.hot && it.state != AppState.FAILED && it.state != AppState.READY }.forEach { it.state = AppState.READY; if (it.detail.isEmpty()) it.detail = "ja deployado" }
+                }
+                changed = true
+            }
             else {
                 val tr = TRANSITION.find(line)
                 if (tr != null) {

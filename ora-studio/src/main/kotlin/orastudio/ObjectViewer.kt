@@ -97,13 +97,20 @@ class ObjectViewerPanel(private val app: AppContext, val handle: ConnectionHandl
                 }
                 if (t != ObjectType.TABLE) ddlTab("DDL")
                 if (t == ObjectType.TABLE) {
-                    lazy("Constraints", { md.constraints(ref) }) { list ->
-                        if (list.isEmpty()) emptyLabel("Sem constraints") else
+                    lazy("Constraints", { md.constraints(ref) to md.referencedBy(ref) }) { (list, refs) ->
+                        val own: JComponent = if (list.isEmpty()) emptyLabel("Sem constraints") else
                             SimpleTable(listOf("Nome", "Tipo", "Colunas", "Referencia", "Colunas ref.", "On delete", "Condição", "Estado"),
                                 list.map { c -> listOf(c.name, c.type, c.columns, c.refTable?.let { LinkCell(it) } ?: "", c.refColumns ?: "", c.deleteRule ?: "", c.condition ?: "", c.status) }, open)
+                        val inbound = JPanel(BorderLayout()).apply {
+                            add(JLabel("  Referenciada por (FKs de outras tabelas): ${refs.size}").apply { font = font.deriveFont(Font.BOLD) }, BorderLayout.NORTH)
+                            add(if (refs.isEmpty()) emptyLabel("Nenhuma FK de outra tabela aponta para esta") else
+                                SimpleTable(listOf("Tabela", "FK", "Colunas", "Referencia", "On delete", "Estado"),
+                                    refs.map { listOf(LinkCell(it.table), it.name, it.columns, it.refConstraint, it.deleteRule ?: "", it.status) }, open), BorderLayout.CENTER)
+                        }
+                        JSplitPane(JSplitPane.VERTICAL_SPLIT, own, inbound).apply { resizeWeight = 0.5 }
                     }
                 }
-                if (t == ObjectType.TABLE || t == ObjectType.MATERIALIZED_VIEW) {
+if (t == ObjectType.TABLE || t == ObjectType.MATERIALIZED_VIEW) {
                     lazy("Índices", { md.indexes(ref) }) { list ->
                         if (list.isEmpty()) emptyLabel("Sem índices") else
                             SimpleTable(listOf("Nome", "Tipo", "Único", "Colunas", "Estado"),

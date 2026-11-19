@@ -54,10 +54,18 @@ class DbSession(val conn: Connection, val label: String) : AutoCloseable {
     /** Pedido de cancelamento do utilizador: o executor de scripts pare apos a instrucao corrente. */
     @Volatile var cancelRequested = false
 
+    /** Ja fechada: pedidos tardios (p.ex. a arvore a atualizar enquanto se desliga) falham com uma mensagem clara. */
+    @Volatile var closed = false
+        private set
+
     fun <T> submit(task: () -> T): CompletableFuture<T> {
         val f = CompletableFuture<T>()
-        exec.execute {
-            try { f.complete(task()) } catch (t: Throwable) { f.completeExceptionally(t) }
+        try {
+            exec.execute {
+                try { f.complete(task()) } catch (t: Throwable) { f.completeExceptionally(t) }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            f.completeExceptionally(IllegalStateException("A sessao ja foi fechada"))
         }
         return f
     }
@@ -73,23 +81,41 @@ class DbSession(val conn: Connection, val label: String) : AutoCloseable {
      * Pede ao servidor para cancelar a instrucao corrente. Se ao fim de [graceMs] ela ainda estiver a
      * correr (p.ex. o "break" do Oracle nao atravessa NAT/proxies), fecha a ligacao a forca.
      */
-    fun cancelCurrent(graceMs: Long = 4000) {
+    fun cancelCurrent(graceMs: Long = 2500, onForced: () -> Unit = {}) {
         cancelRequested = true
         val st = running ?: return
-        try { st.cancel() } catch (_: Exception) {}
+        // Statement.cancel() pode ficar bloqueado atras do proprio pedido que se quer cancelar: nunca na thread do chamador
+        Thread({ try { st.cancel() } catch (_: Throwable) {} }, "cancel-$label").apply { isDaemon = true }.start()
         Thread({
-            try { Thread.sleep(graceMs) } catch (_: InterruptedException) { return@Thread }
+            if (graceMs > 0) try { Thread.sleep(graceMs) } catch (_: InterruptedException) { return@Thread }
             if (running === st) {
-                try { conn.close() } catch (_: Exception) {}
+                abortConnection()
+                onForced()
             }
         }, "cancel-watchdog-$label").apply { isDaemon = true }.start()
     }
 
+    /** "SID,SERIAL#" desta sessao no servidor (se o utilizador puder ler v$session); serve para a matar quando o cancelar nao chega. */
+    @Volatile var serverSid: String? = null
+
+    /**
+     * Corta a ligacao SEM esperar pelo pedido em curso: Connection.abort() (ojdbc7+ fecha o socket de imediato); com
+     * ojdbc6 (sem abort) tenta close() numa thread a parte, para nao bloquear ninguem.
+     */
+    fun abortConnection() {
+        Thread({
+            try { conn.abort(Runnable::run) } catch (_: Throwable) { try { conn.close() } catch (_: Throwable) {} }
+        }, "abort-$label").apply { isDaemon = true }.start()
+    }
+
     fun isValid(): Boolean = try { !conn.isClosed && conn.isValid(3) } catch (_: Exception) { false }
 
+    /** Idempotente (desligar pode fechar a mesma sessao por mais de um caminho). */
     override fun close() {
-        cancelCurrent()
-        exec.execute { try { conn.close() } catch (_: Exception) {} }
+        if (closed) return
+        closed = true
+        cancelCurrent(graceMs = 2500)
+        try { exec.execute { try { conn.close() } catch (_: Exception) {} } } catch (_: java.util.concurrent.RejectedExecutionException) {}
         exec.shutdown()
     }
 }

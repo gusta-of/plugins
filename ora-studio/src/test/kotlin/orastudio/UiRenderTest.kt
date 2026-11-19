@@ -32,6 +32,7 @@ class UiRenderTest {
         val opened = mutableListOf<ObjectRef>()
         val consoles = mutableListOf<String?>()
         override fun openObject(handle: ConnectionHandle, ref: ObjectRef) { opened += ref }
+        override fun openJob(handle: ConnectionHandle, job: JobInfo) {}
         override fun openConsole(handle: ConnectionHandle, text: String?) { consoles += text }
         override fun status(msg: String) {}
     }
@@ -94,10 +95,11 @@ class UiRenderTest {
         SwingUtilities.invokeAndWait { nav.setConnections(listOf(handle)) }
         val conn = nav.nodeFor(handle)!!
         SwingUtilities.invokeAndWait { nav.expandPath(TreePath(conn.path)) }
-        waitFor { conn.childCount > 0 && conn.getChildAt(0) is SchemaNode }
+        waitFor { conn.childCount > 1 && conn.getChildAt(1) is SchemaNode }
+        assertTrue(conn.getChildAt(0) is JobsNode, "o no «Jobs agendados» vem primeiro")
         val demo = (0 until conn.childCount).map { conn.getChildAt(it) }.filterIsInstance<SchemaNode>().first { it.name == "DEMO" }
         assertTrue(demo.current)
-        assertEquals("DEMO", (conn.getChildAt(0) as SchemaNode).name, "schema actual primeiro")
+        assertEquals("DEMO", (conn.getChildAt(1) as SchemaNode).name, "schema actual primeiro (depois dos jobs)")
         SwingUtilities.invokeAndWait { nav.expandPath(TreePath(demo.path)) }
         waitFor { demo.childCount == ObjectType.browsable.size }
         val tables = (0 until demo.childCount).map { demo.getChildAt(it) }.filterIsInstance<CategoryNode>().first { it.type == ObjectType.TABLE }
@@ -370,5 +372,49 @@ class UiRenderTest {
         assertEquals(2, m.detachedCount())
         SwingUtilities.invokeAndWait { m.dispose() }
         assertEquals(0, m.detachedCount())
+    }
+
+    @Test fun `11 jobs agendados na arvore com filtro e painel do job com historico`() {
+        val sess = handle.openSession("jobs-test")
+        try {
+            sess.sync {
+                sess.conn.createStatement().use { st ->
+                    st.execute("BEGIN DBMS_SCHEDULER.CREATE_JOB(job_name => 'UI_JOB_ALFA', job_type => 'PLSQL_BLOCK', job_action => 'BEGIN NULL; END;', repeat_interval => 'FREQ=DAILY;BYHOUR=4', enabled => FALSE, comments => 'alfa'); END;")
+                    st.execute("BEGIN DBMS_SCHEDULER.CREATE_JOB(job_name => 'UI_JOB_BETA', job_type => 'PLSQL_BLOCK', job_action => 'BEGIN NULL; END;', repeat_interval => 'FREQ=HOURLY', enabled => FALSE); END;")
+                }
+            }
+            val nav = Navigator(FakeApp(), FakeActions())
+            SwingUtilities.invokeAndWait { nav.setConnections(listOf(handle)) }
+            val conn = nav.nodeFor(handle)!!
+            SwingUtilities.invokeAndWait { nav.expandPath(TreePath(conn.path)) }
+            waitFor { conn.childCount > 0 && conn.getChildAt(0) is JobsNode }
+            val jobs = conn.getChildAt(0) as JobsNode
+            SwingUtilities.invokeAndWait { nav.expandPath(TreePath(jobs.path)) }
+            waitFor { jobs.childCount > 0 && jobs.getChildAt(0) is JobNode }
+            fun names() = (0 until jobs.childCount).map { jobs.getChildAt(it) }.filterIsInstance<JobNode>().map { it.job.name }
+            assertTrue(names().containsAll(listOf("UI_JOB_ALFA", "UI_JOB_BETA")), "jobs listados: ${names()}")
+            // filtro por nome: so o ALFA; limpar volta a mostrar os dois
+            SwingUtilities.invokeAndWait { nav.setJobFilter(jobs, "alfa") }
+            assertEquals(listOf("UI_JOB_ALFA"), names())
+            assertTrue(jobs.toString().contains("filtro: alfa"))
+            SwingUtilities.invokeAndWait { nav.setJobFilter(jobs, "ui_job_*a") }   // curinga
+            assertEquals(listOf("UI_JOB_ALFA", "UI_JOB_BETA").filter { it.endsWith("A") }, names())
+            SwingUtilities.invokeAndWait { nav.setJobFilter(jobs, "/BETA$/") }     // regex
+            assertEquals(listOf("UI_JOB_BETA"), names())
+            SwingUtilities.invokeAndWait { nav.setJobFilter(jobs, "") }
+            assertTrue(names().size >= 2)
+            snapshot(javax.swing.JScrollPane(nav), 360, 300, "11-jobs-arvore")
+            // painel do job: mostra o carregamento e depois o texto com o codigo
+            val job = (0 until jobs.childCount).map { jobs.getChildAt(it) }.filterIsInstance<JobNode>().first { it.job.name == "UI_JOB_ALFA" }.job
+            val panel = JobViewerPanel(FakeApp(), handle, job)
+            waitFor { panel.loaded }
+            assertTrue(panel.text.contains("-- JOB DEMO.UI_JOB_ALFA   [DBMS_SCHEDULER]"))
+            assertTrue(panel.text.contains("FREQ=DAILY;BYHOUR=4"))
+            assertTrue(panel.text.trimEnd().endsWith("BEGIN NULL; END;"))
+            snapshot(panel, 900, 420, "11-job-painel")
+        } finally {
+            sess.sync { sess.conn.createStatement().use { st -> listOf("UI_JOB_ALFA", "UI_JOB_BETA").forEach { j -> try { st.execute("BEGIN DBMS_SCHEDULER.DROP_JOB('$j', TRUE); END;") } catch (_: Exception) {} } } }
+            sess.close()
+        }
     }
 }
